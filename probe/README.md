@@ -99,3 +99,64 @@ $env:ELECTRON_RUN_AS_NODE = 1
 `verify.py`、`check_url.py`）。产出的音色库在 [`../纳西妲_中文配音/`](../纳西妲_中文配音/)。
 
 **没用了可以直接删** —— 音色库本身（77 个 mp3 + manifest + CSV + 台词稿）已经独立存在。
+
+---
+
+## 发布到 GitHub
+
+插件本体（**不含本目录**）发布到 <https://github.com/HimaCSR/dsh-voice-chat>。
+
+```powershell
+.\probe\tools\publish.ps1 -DryRun     # 预演：重建 release 分支和安装包，不推送
+.\probe\tools\publish.ps1             # 推送分支 + 标签
+```
+
+`publish.ps1` 做四件事：`git subtree` 拆出 `release` 分支 → `git archive` 打
+`dist\dsh-voice-chat-<版本>.zip` → 打 `v<版本>` 标签 → 推送 `release:main` 和标签。
+
+### 为什么用 subtree，而不是直接推 main
+
+**公开仓库必须让 `package.json` 位于仓库根**，否则 `dsh plugin add github:HimaCSR/dsh-voice-chat`
+会找不到清单。而插件在本地是 `dsh-voice-chat/` 子目录（profile 的 `link:` 依赖和 HMR root
+都钉死了这个路径，不能搬）。`git subtree split --prefix=dsh-voice-chat` 正好把插件提升为分支根。
+
+### ⚠️ 本地 `main` ≠ 远程 `main`
+
+| 分支 | 内容 |
+|---|---|
+| 本地 `main` | **开发内容**：`dsh-voice-chat/` + `probe/` + 工作区 README |
+| 本地 `release` | 插件本体，根目录就是 `package.json`（每次发布由脚本重建） |
+| 远程 `main` | = 本地 `release`。**只有这样别人才能一行装** |
+
+两者**没有共同祖先**。直接 `git push origin main` 会失败，`--force` 则会用开发内容
+（含 `probe/`）覆盖掉线上仓库。所以本仓库已设 `branch.main.pushRemote = no_push`
+把这条路堵死 —— **发布只走 `publish.ps1`**。
+
+### 本机发布依赖的两个非默认设置
+
+1. **必须用 Git 自带的 ssh**：Windows 内置的 OpenSSH 8.1p1 与 GitHub 密钥交换不兼容，
+   症状是「主机密钥校验通过后仍报 Host key verification failed」。
+   已配进本仓库 `core.sshCommand`：
+   ```
+   C:/PROGRA~1/Git/usr/bin/ssh.exe -i C:/Users/74260/.ssh/id_ed25519_github_dshvoice -o IdentitiesOnly=yes
+   ```
+2. **`known_hosts` 里 github.com 的三行是官方指纹**（2023 年 GitHub 换过 RSA 密钥）。
+   若再出现主机密钥告警，去官方文档核对，不要盲目删除。
+
+### 发布后的最后一步
+
+到仓库的 **Releases** 页 Draft a new release → 选 `v1.0.0` 标签 → 把
+`dist\dsh-voice-chat-1.0.0.zip` 作为附件上传。这一步目前只能手工做（除非提供 token）。
+
+### 本机踩过的编码坑（写脚本必读）
+
+**Windows PowerShell 5.1 读 `.ps1` 时按 ANSI(936) 解析**，所以含中文的 `.ps1`
+**必须存成 UTF-8 with BOM**，否则中文变乱码、还会把后面的引号一起吃掉，语法直接崩。
+`publish.ps1` 就是因此写了两次。给文件补 BOM：
+
+```powershell
+$p = 'probe\tools\publish.ps1'
+$t = [System.IO.File]::ReadAllText($p, [System.Text.UTF8Encoding]::new($false))
+[System.IO.File]::WriteAllText($p, $t, [System.Text.UTF8Encoding]::new($true))   # $true = 带 BOM
+```
+

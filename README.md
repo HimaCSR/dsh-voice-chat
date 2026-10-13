@@ -27,6 +27,26 @@ git ls-files        # 看实际跟踪了什么
 
 排除不等于删除 —— 东西都还在磁盘上，只是不参与版本历史。
 
+### GitHub 仓库
+
+插件已发布到 **<https://github.com/HimaCSR/dsh-voice-chat>**（public，MIT）。
+
+```powershell
+.\probe\tools\publish.ps1 -DryRun     # 预演
+.\probe\tools\publish.ps1             # 真正发布（推分支 + 标签）
+```
+
+**注意：本地 `main` 和远程 `main` 不是同一份内容。**
+
+| 分支 | 内容 |
+|---|---|
+| 本地 `main` | 开发内容：`dsh-voice-chat/` + `probe/` + 本文件 |
+| 本地 `release` | 由 `publish.ps1` 用 `git subtree` 重建，根目录即插件的 `package.json` |
+| 远程 `main` | = 本地 `release`，**不含 `probe/`** |
+
+两者无共同祖先。本仓库已设 `branch.main.pushRemote = no_push` 堵死误推 ——
+**发布只走 `publish.ps1`**，别直接 `git push`。详见 [`probe/README.md`](probe/README.md)。
+
 ---
 
 ## 从哪开始
