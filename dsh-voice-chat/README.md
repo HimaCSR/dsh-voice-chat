@@ -74,20 +74,55 @@ dsh plugin --profile desktop add github:HimaCSR/dsh-voice-chat
 
 ## 2. 第一次使用：下载模型
 
-安装后输入框上方会出现语音工具行。首次点麦克风时模型还没准备好，工具行会显示 **⚠ 语音模型未就绪**。
+**插件本体不含模型文件**，装完只有界面：球是琥珀色，旁边显示 **⚠ 语音模型未就绪**。
 
-点 **🎙️ 音色** 打开设置面板 → **下载并准备本地模型**，会下载并逐个校验（字节数 + SHA-256）：
+点那颗球 → 展开 → **设置**（齿轮）→ 点「**下载并准备本地模型**」，等进度条走完。
 
-| 文件 | 大小 | 来源 |
-|---|---|---|
-| `sensevoice.int8.onnx` | 228 MB | Hugging Face（不通时自动走 hf-mirror.com） |
-| `tokens.txt` | 309 KB | 同上 |
-| `fireredvad_stream_vad_with_cache.onnx` | 2.2 MB | FireRedVAD 官方仓库 |
-| `cmvn.ark` | 1.3 KB | 同上 |
+### 会下哪几个文件
 
-模型缓存在 `%DSH_HOME%\voice-chat\`（默认 `C:\Users\<你>\.dsh\voice-chat\`），升级插件不会重新下载。
+默认配置（`precision=int8`、`vadBackend=firered`）取回 **6 个文件，约 233 MB**：
 
-> 嫌 228 MB 大？`int8` 已是默认；`fp32` 要 938 MB 且更慢，不建议。
+| 文件 | 大小 | 用途 | 来源 |
+|---|---|---|---|
+| `sensevoice.int8.onnx` | **228 MB** | **语音识别主模型** | Hugging Face（不通时自动走 `hf-mirror.com`） |
+| `tokens.txt` | 309 KB | SentencePiece 词表 | 同上 |
+| `fireredvad_stream_vad_with_cache.onnx` | 2.2 MB | **端点检测主模型** | FireRedVAD 官方仓库（不通时自动走 `gh-proxy.com`） |
+| `cmvn.ark` | 1.3 KB | FireRedVAD 的 CMVN 参数 | 同上 |
+| `ten-vad.onnx` | ~1 MB | FireRedVAD 起不来时的兜底 | sherpa-onnx releases（同样有 `gh-proxy.com` 回退） |
+| `silero_vad.onnx` | 1.7 MB | 第二个兜底 | Hugging Face |
+
+> 两个兜底加起来才几 MB，但**必须一起下**：sherpa 的 C++ 层在 VAD 文件缺失时直接 `exit(-1)`
+> 杀掉识别进程，而不是降级 —— 一个"要先下载才能用的兜底"等于没有兜底。
+
+### 落在哪里
+
+```
+%DSH_HOME%\voice-chat\          （默认 C:\Users\<你>\.dsh\voice-chat\）
+├── config.json                 ← API Key 等配置，只在本机
+├── models\
+│   ├── sensevoice.int8.onnx
+│   └── tokens.txt
+├── vad\
+│   ├── firered\
+│   │   ├── fireredvad_stream_vad_with_cache.onnx
+│   │   └── cmvn.ark
+│   ├── ten-vad.onnx
+│   └── silero_vad.onnx
+└── voices\                     ← 克隆出来的音色，一个目录一个
+```
+
+下载是**幂等**的：已完整且校验通过的文件跳过，缺的或校验不过的才重拉，中断的半个文件不会被当成完整的。
+所以卡住了直接再点一次即可；**升级插件也不会重新下载**。
+
+### 下载失败怎么办
+
+1. **内置两级镜像回退**，一般不用管：HuggingFace → 自动追加 `hf-mirror.com`；GitHub → 自动追加 `gh-proxy.com`。
+2. **手动放文件**（终极办法）：按上面的目录结构把文件放好。插件会自己校验大小与 SHA-256，
+   校验通过就直接用，不会再下载。
+3. **复用 DSH 自带的 SenseVoice 缓存**：本插件与 **DSH 内置 SenseVoice provider 钉的是同一个 revision**，
+   把配置项 `stt.modelDirectory` 指向那个已存在的目录即可，省下 228 MB。
+
+> 嫌 228 MB 大？`int8` 已是默认；`fp32` 要 **894 MB** 且更慢，不建议。
 
 ---
 
@@ -287,7 +322,7 @@ tts:
 | 现象 | 原因 / 处理 |
 |---|---|
 | **改了插件代码但没生效** | 分三种情况：`index.js` / `lib/*.js`（Host 半区）**保存即热重载**，数百毫秒生效（见 DEVELOPING §2）；`client.js`（浏览器半区）**必须刷新页面**（F12 → Ctrl+R）；`package.json` 的清单字段（如 `dsh.client.inject`）**必须重启 DSH**。注意「停用再启用插件行」是另一条路径——它只重挂配置、不重新导入模块，既不能替代热重载，也不能替代重启 |
-| 工具行显示 **⚠ 语音模型未就绪** | 点开设置面板 → **下载并准备本地模型**（首次约 240 MB）。胶球本身也会变琥珀色 |
+| 胶球旁显示 **⚠ 语音模型未就绪** | 点开设置面板 → **下载并准备本地模型**（首次约 233 MB）。胶球图标本身也会变琥珀色 |
 | `下载失败：所有源都不可用` | huggingface.co 与 hf-mirror.com 都不通。可在 `config.stt.modelDirectory` 指向已有的 SenseVoice 目录 |
 | 设置面板里 `断句 VAD` 不是 `firered` | 先用 `GET /dsh-voice/diag` 看 `modules.onnxruntime` 的解析结果和 `attempts`（每个解析根失败的原因都在里面），再看同一行的 `vadNote`。装不上只会降级，不影响使用 |
 | `/diag` 返回 404 | 说明 Host 半区还是旧代码，重启 DSH |
@@ -322,7 +357,7 @@ dsh-voice-chat/
 ├── package.json            插件清单：dsh.bundle.patch + dsh.client(web) + onnxruntime-node 依赖
 ├── cordis.patch.yml        插入一行 Host 插件（行名必须等于包名）
 ├── index.js                Host 半区：配置、路由注册、worker 生命周期、模型准备
-├── client.js               浏览器半区：工具行 + 回复监听 + 麦克风采集 + FIFO 播放（单文件、无构建）
+├── client.js               浏览器半区：胶球 UI + 回复监听 + 麦克风采集 + FIFO 播放（单文件、无构建）
 ├── icon.svg / locale/*.json 展示元信息
 └── lib/
     ├── assets.js           模型清单 + 下载校验（size + SHA-256，HF/hf-mirror 回退）
