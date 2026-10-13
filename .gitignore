@@ -1,0 +1,5 @@
+# 本仓库只含插件本体；开发脚本不在此仓库内
+node_modules/
+*.log
+.DS_Store
+Thumbs.db

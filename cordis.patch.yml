@@ -1,0 +1,31 @@
+# Voice chat bundle: one Host row. The row name must equal the package name —
+# `@deepseek-ai/dsh-client-modules` attaches a package's browser half only to
+# the Loader row whose specifier is exactly that package name.
+#
+# `dataRoot` is intentionally absent: the plugin defaults it to
+# `<DSH_HOME>/voice-chat`, so the model cache and cloned voices survive a plugin
+# update instead of being re-downloaded. Override it here (or in the profile
+# patch) if the cache should live elsewhere.
+- insert:
+    - id: voice-chat
+      name: '@local/dsh-voice-chat'
+      config:
+        stt:
+          enabled: true
+          # `firered` runs the official FireRedVAD ONNX graph through
+          # onnxruntime-node; it degrades to `ten` (TEN-VAD via sherpa-onnx)
+          # when that runtime is unavailable, and says so in the settings UI.
+          vadBackend: firered
+          vadFallback: ten
+          language: auto
+          precision: int8
+        tts:
+          provider: mimo
+          # `mimo-v2.5-tts` for a preset voice, `mimo-v2.5-tts-voiceclone` when
+          # a cloned voice is selected. The key comes from MIMO_API_KEY or from
+          # the plugin's settings panel.
+          model: mimo-v2.5-tts
+          cloneModel: mimo-v2.5-tts-voiceclone
+          baseUrl: https://api.xiaomimimo.com/v1
+          voice: mimo_default
+          format: wav

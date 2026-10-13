@@ -1,0 +1,59 @@
+{
+  "name": "@local/dsh-voice-chat",
+  "version": "1.0.0",
+  "private": true,
+  "description": "本地 SenseVoice-Small 语音识别 + FireRedVAD 端点检测 + 线上 TTS（默认小米 MiMo，支持声音克隆）+ 插话打断",
+  "type": "module",
+  "icon": "./icon.svg",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib/**/*.js",
+    "locale/*.json",
+    "icon.svg",
+    "cordis.patch.yml"
+  ],
+  "dependencies": {
+    "onnxruntime-node": "^1.30.0"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-chat"
+      ]
+    }
+  },
+  "license": "MIT",
+  "author": "HimaCsr <1986303308@qq.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HimaCSR/dsh-voice-chat.git"
+  },
+  "homepage": "https://github.com/HimaCSR/dsh-voice-chat#readme",
+  "bugs": {
+    "url": "https://github.com/HimaCSR/dsh-voice-chat/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "voice",
+    "speech-to-text",
+    "text-to-speech",
+    "sensevoice",
+    "fireredvad",
+    "voice-clone"
+  ]
+}

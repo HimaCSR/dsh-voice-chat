@@ -1,0 +1,4 @@
+{
+  "title": "DSH-Voice",
+  "description": "本地 SenseVoice-Small 识别 + FireRedVAD 断句 + 线上 TTS（默认小米 MiMo，可声音克隆），说话即打断。"
+}
