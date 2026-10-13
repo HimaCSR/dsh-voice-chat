@@ -3,16 +3,18 @@
 版本号以 `package.json` 的 `version` 为准；每次发布打一个 `vX.Y.Z` 标签。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-## 迭代流程（三行）
+## 版本约定
 
-```powershell
-# 1. 改代码 → 2. 跑验证 → 3. 改 version、写 CHANGELOG、提交打标签
-cd <仓库根>
-& $node probe\verify\unit-tests.mjs          # 至少这一套 + live-verify
-git add -A; git commit -m "feat: ..."; git tag v1.1.0
-```
+版本号以 `package.json` 的 `version` 为准；每次发布打一个 `vX.Y.Z` 标签。
 
-**改 `client.js` 之后必须刷新页面**（F12 → Ctrl+R），Host 半区才是热重载。
+| 改了什么 | 升哪一位 | 例 |
+|---|---|---|
+| 修 bug、改文档 | patch | `1.0.0 → 1.0.1` |
+| 加功能（向后兼容） | minor | `1.0.1 → 1.1.0` |
+| 破坏性改动（改配置项名、改 HTTP 路由） | major | `1.1.0 → 2.0.0` |
+
+> 改 `client.js` 之后**必须刷新页面**（F12 → Ctrl+R）；只有 Host 半区（`index.js` / `lib/*.js`）是热重载的。
+> 本仓库只含插件本体，验证脚本与发布流程在项目开发侧，不随插件分发。
 
 ---
 
