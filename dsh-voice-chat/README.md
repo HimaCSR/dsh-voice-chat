@@ -18,6 +18,25 @@
 
 插件以 **bundle 包**形式交付，没有构建步骤。安装会把包写进 `desktop` profile，改动对该 profile 的所有会话生效。
 
+### ⚠️ 装之前先知道这 4 件事（**不是一步到位**）
+
+**① 装完必须再下模型 —— 这一步不能省。** 插件不含模型文件，共 **228 MB 起**（SenseVoice 识别模型 + FireRedVAD + TEN-VAD 兜底）。装好后打开设置面板点「**下载并准备本地模型**」，等进度条走完。没下模型时只有 UI，识别和朗读都不工作（球会显示琥珀色 ⚠）。
+
+**② 需要本机有 git，且能连上 GitHub。** `github:` 安装由 pnpm 调 git 拉取代码。网络对 GitHub 不稳时（连接被重置），改用**方式 B 的本地 zip** 更可靠。
+
+**③ `onnxruntime-node`（解包 287 MB）是可选的。** 它只服务 FireRedVAD 端点检测：
+
+- 用 `github:` 安装 → pnpm 会**自动装**，无需干预
+- 用本地 `link:` 安装 → pnpm **不会**装被链接包的依赖，要单独跑一条
+  ```powershell
+  dsh plugin --profile desktop add onnxruntime-node@^1.30.0
+  ```
+- **不装插件也能用**：会自动降级到 TEN-VAD，只影响断句精度，并在设置面板与 `/dsh-voice/state` 的 `vadNote` 里说明原因
+
+**④ 朗读需要 API Key，但这是可选的。** 语音识别**完全本地、零 Key**；只有语音输出需要配一个 MiMo（`api.xiaomimimo.com`）或任意 OpenAI 兼容的 Key。不配就是「能听不能说」。
+
+一句话总结：**一行装插件 → 点一下下模型 = 能听；再配个 Key = 能说。**
+
 **方式 A：一行安装（推荐）**
 
 ```powershell
