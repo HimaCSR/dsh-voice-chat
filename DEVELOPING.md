@@ -24,9 +24,17 @@
 ① 读上下文（上面四步）
 ② 改代码（能用 edit 就别 write 整文件，见 §4）
 ③ 跑验证：至少 unit-tests + live-verify；动了 CSS 再加 render-orb
-④ 更新 package.json 的 version 与 CHANGELOG.md
-⑤ git add -A && git commit -m "..." && git tag vX.Y.Z
+④ 更新 dsh-voice-chat/package.json 的 version 与 CHANGELOG.md
+   （必须先在 CHANGELOG.md 写 ## [<新版本>] 一节，否则 publish.ps1 会拒绝发布）
+⑤ git add -A && git commit -m "..."
+⑥ .\probe\tools\publish.ps1 -DryRun      ← 先预演
+   .\probe\tools\publish.ps1              ← 正式发布
+⑦ 把脚本打印的 Release 链接交给用户，提醒他上传 dist\dsh-voice-chat-<版本>.zip
 ```
+
+> **⛔ 不要 `git tag`、不要 `git push`。** 打标签、推分支、推标签、打安装包全部由
+> `publish.ps1` 负责。本仓库已设 `branch.main.pushRemote = no_push` —— 本地 `main` 是
+> 开发内容（含 `probe/`），远程 `main` 是插件本体，两者无共同祖先，直接推会毁掉线上仓库。
 
 ### 版本号约定
 
@@ -37,6 +45,9 @@
 
 **当前基线**：单测 18/18、HTTP 契约 12/12、worker 端到端 7/7、活体验证 14/14。
 任何一次迭代结束时这些数字都不该下降。
+
+发布机制、`git subtree` 为什么必要、以及本地/远程 `main` 的差异，见
+[`../probe/README.md`](../probe/README.md) 的「发布到 GitHub」一节。
 
 ---
 
