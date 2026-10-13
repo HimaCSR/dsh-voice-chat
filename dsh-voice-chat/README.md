@@ -1,0 +1,377 @@
+# DSH-Voice 语音对话插件（`@local/dsh-voice-chat`）
+
+给 DeepSeek Harness 加一套**完全本地**的语音输入 + **在线**语音输出：说话就识别、回复就朗读，你开口说话它立刻闭嘴听你说。
+
+| 能力 | 实现 |
+|---|---|
+| 语音识别（STT） | **本地 SenseVoice-Small**（int8 ONNX，228 MB，CPU 推理，sherpa-onnx） |
+| 断句 / 端点检测（VAD） | **FireRedVAD**（官方 ONNX，本插件自己实现的 Kaldi fbank + CMVN + FSMN 流式推理） |
+| 语音合成（TTS） | **线上 API，默认小米 MiMo**（`api.xiaomimimo.com`），也支持任意 OpenAI 兼容的 `/audio/speech` |
+| 声音克隆 | MiMo `mimo-v2.5-tts-voiceclone`：上传 5~20 秒参考音频即零样本克隆，无需训练、无参考文本 |
+| 插话打断（barge-in） | 朗读中你一开口，立即停播 + 中止在途合成 + 丢弃本轮剩余句子，你这句话成为新一轮 |
+
+不需要 NVIDIA 显卡、不需要 WSL、不需要 Python、不需要编译——全部跑在 DSH 自己的进程里。
+
+---
+
+## 1. 安装
+
+插件以 **bundle 包**形式交付，没有构建步骤。安装会把包写进 `desktop` profile，改动对该 profile 的所有会话生效。
+
+**方式 A：一行安装（推荐）**
+
+```powershell
+dsh plugin --profile desktop add github:HimaCSR/dsh-voice-chat
+```
+
+**方式 B：Web 界面**
+
+1. 侧栏 → **插件** → **添加插件**
+2. 在输入框里粘贴插件目录的绝对路径，例如：
+   ```
+   <你放置插件的目录>\dsh-voice-chat
+   ```
+3. 点 **安装**，装完点 **立即启用**
+4. 刷新页面（`Ctrl+R`）
+
+**方式 C：Creator 预设 + `plugin_manager`**
+
+把会话切到 **cordis（Creator）** 预设，然后让 agent 用 `plugin_manager` 的 `install_bundle`、`target` = 上面的绝对路径。
+然后把包名 `@local/dsh-voice-chat` 追加到 `%DSH_HOME%\profiles\desktop\package.json` 的 `dsh.profile.bundles` 数组，重启 DSH。
+
+> **实测记录（本机）**：`dsh plugin --profile desktop add "<路径>"` 会同时完成两件事——以 `link:` 方式把插件装进 profile 的 `node_modules`，并把包名追加进 `dsh.profile.bundles`。跑完插件**当场就生效了**（Web 配置层热重载），不需要重启。
+> **之后改插件代码不必重启**：profile patch 末尾给 `@deepseek-ai/dsh-hmr` 配了 `root` 指向插件目录，Host 半区（`index.js` / `lib/*.js`）保存即热重载。实测（2026-10-13）：写入 `index.js` 后，下一次 400 ms 采样就已在 `/dsh-voice/state` 里看到新代码，路由全程无 404 空窗。生效矩阵与两个代价见 DEVELOPING §2。
+>
+> **关于依赖**：`dsh plugin add <路径>` 用的是 `link:` 协议，pnpm **不会**顺带安装被链接包的依赖，所以 `onnxruntime-node` 要单独装一次：
+> ```powershell
+> dsh plugin --profile desktop add onnxruntime-node@^1.30.0
+> ```
+> 它在 Windows x64 上**自带预编译二进制**，安装脚本只是去取 CUDA/TensorRT 那两个用不到的可选组件，因此：
+> - pnpm 报 `ERR_PNPM_IGNORED_BUILDS: onnxruntime-node` 是**正常且无害**的（本机已实测：不跑脚本，原生绑定照样加载、推理照样成功）；
+> - 本机把 profile 的 `pnpm-workspace.yaml` 里 pnpm 写下的 `allowBuilds: onnxruntime-node:` 置为 `false`，即明确拒绝执行该脚本，插件功能不受影响。想改成允许就把它设为 `true`；
+> - `onnxruntime-node` 解包约 287 MB，只用于 FireRedVAD。**没装上也不会让插件挂掉**——它会自动降级到 TEN-VAD，并在设置面板与 `/dsh-voice/state` 的 `vadNote` 里说明原因。
+
+---
+
+## 2. 第一次使用：下载模型
+
+安装后输入框上方会出现语音工具行。首次点麦克风时模型还没准备好，工具行会显示 **⚠ 语音模型未就绪**。
+
+点 **🎙️ 音色** 打开设置面板 → **下载并准备本地模型**，会下载并逐个校验（字节数 + SHA-256）：
+
+| 文件 | 大小 | 来源 |
+|---|---|---|
+| `sensevoice.int8.onnx` | 228 MB | Hugging Face（不通时自动走 hf-mirror.com） |
+| `tokens.txt` | 309 KB | 同上 |
+| `fireredvad_stream_vad_with_cache.onnx` | 2.2 MB | FireRedVAD 官方仓库 |
+| `cmvn.ark` | 1.3 KB | 同上 |
+
+模型缓存在 `%DSH_HOME%\voice-chat\`（默认 `C:\Users\<你>\.dsh\voice-chat\`），升级插件不会重新下载。
+
+> 嫌 228 MB 大？`int8` 已是默认；`fp32` 要 938 MB 且更慢，不建议。
+
+---
+
+## 3. 配置 TTS（小米 MiMo）
+
+在 [小米 MiMo 开放平台](https://mimo.mi.com/) 申请 API Key，然后**二选一**：
+
+- 设环境变量 `MIMO_API_KEY`（推荐，Key 不落盘）；
+- 或在插件设置面板的 **MiMo API Key** 输入框里填（保存在 `%DSH_HOME%\voice-chat\config.json`）。
+
+**没有 Key 时**：识别、断句、插话打断全都照常可用，只有朗读会返回明确的 `no-api-key` 错误，不会静默失败。想先验证整条朗读链路（句子切分 → 合成请求 → 队列播放 → 打断），把 `provider` 改成 `dev-tone`，它会生成一段长度随句子变化的提示音。
+
+### MiMo 的接口形状（实现依据）
+
+它**不是** OpenAI 的 `/v1/audio/speech`，而是复用 chat completions：
+
+```http
+POST https://api.xiaomimimo.com/v1/chat/completions
+api-key: <KEY>            # 也接受 Authorization: Bearer <KEY>
+
+{
+  "model": "mimo-v2.5-tts",              // 克隆时用 mimo-v2.5-tts-voiceclone
+  "messages": [
+    { "role": "user",      "content": "风格指令，不会被念出来" },
+    { "role": "assistant", "content": "真正要念的文本" }   // ← 文本必须在 assistant
+  ],
+  "audio": {
+    "format": "wav",
+    "voice": "mimo_default"              // 克隆时是 data:audio/wav;base64,……
+  },
+  "stream": false
+}
+```
+
+音频在 `choices[0].message.audio.data`（base64）。克隆约束：参考音频只能是 **wav/mp3**，base64 后 **≤ 10 MB**，且克隆不支持流式。
+
+想确认"到底会发什么"而不真的发请求：`POST /dsh-voice/tts/plan` 会返回将要发送的 model、消息角色顺序、voice 类型和数据长度、以及 header 名字。
+
+---
+
+## 4. 使用
+
+输入框上方是一颗**透明胶球**（iOS 控制中心那套磨砂玻璃材质）。点它，大珠子碎成四颗小胶球，各带功能名：
+
+| 小胶球 | 作用 |
+|---|---|
+| **麦克风** | 点一下开始**连续聆听**：说完停顿约 0.9 秒自动把识别文字发出去；再点一下停止 |
+| **朗读** | 回复逐句朗读的总开关（localStorage `dsh.voice.enabled`） |
+| **插话 / 排队** | **插话**：处理中你一说话就打断当前轮次（`steer`）。**排队**：等当前回复说完再接（`queue`） |
+| **设置** | 设置面板：引擎状态、模型准备、音色切换/新建、API Key、识别语言 |
+
+音色名**不再显示在按钮上**，改在设置面板里选。
+
+### 胶球是怎么动的
+
+球在任何状态下都**保持透明** —— 只有里面的图标换色：待机/朗读为常规色，聆听为红，识别中与未就绪为琥珀。
+
+| 状态 | 表现 |
+|---|---|
+| 待机 | 轮廓按 9.3 秒一轮的不规则关键帧缓缓起伏（纯 CSS） |
+| 聆听 / 识别中 | 三圈同心水波向外荡（2.4s / 1.35s），叠加亚像素级高频震动 |
+| 朗读中 | 轮廓由**真实音频**驱动：`Speaker` 里的 `AnalyserNode` 给出响度，四组互质频率（0.27 / 0.41 / 0.63 / 0.19 Hz）的正弦叠加算出 `border-radius`，所以永远看不出循环 —— 像浪一样此起彼伏，音量越大起伏越明显 |
+
+### 把它挪到顺手的地方
+
+胶球是**固定定位的浮层**，可以拖着走：
+
+- **可移动区域是对话区**，不是整个窗口 —— 胶球只用**对话面板**那块矩形，所以它不会飘到侧栏或标题栏上。这块区域是运行时从 DOM 找出来的（离它最近的一个 `overflow: auto/scroll/hidden` 且够大的祖先容器），找不到才退回整个窗口。
+- **靠近边缘才吸**：松手时只有**离边小于一个大水球的直径（52px）**才会吸上去 —— 更远就停在原地不动。吸上之后只保留垂直于那条边的坐标。
+- **吸住时球会瘫软耷拉**：贴边的那一侧被压扁、整体朝下坠一点、还带 10° 的倾斜（贴在左/右边缘时），从上边缘吸住则竖向压扁、向下坠。就是一颗挂在玻璃上的水珠，不是一个球。
+- 展开的扇形是**边缘感知**的：没吸边时，球在对话区右半边就往左扇、左半边就往右扇、靠近顶部就改成向下扇。**吸住时改成沿边缘平行排布** —— 贴在左/右边缘竖着排成一列，贴在上/下边缘横着排成一行。
+- **小胶球之间会互相排斥**：越界的球先被边缘**按越界距离弹回来**（反射，不是压边线），然后做最多 16 轮松弛，把重叠的球互相推开，每轮之后重新夹回边界内。所以四颗球既不会叠在一起，也不会被裁掉。
+- 位置按**对话区比例**存进 localStorage（`dsh.voice.pos`）；窗口变化时重新测量并夹回可见区。
+- **点球体**展开/收起。展开后**点界面任何别的地方**（或按 Esc）四颗小胶球自动收回成大胶球 —— 点设置面板里的按钮则不会收回。
+- 想重置位置：清掉 localStorage 的 `dsh.voice.pos`。
+
+`prefers-reduced-motion: reduce` 时所有波动、震动、水波都会关掉。
+
+### 声音克隆
+
+设置面板 → **新建克隆音色**：填音色名 + 选参考音频（wav/mp3，**5~20 秒干净人声**最稳）+ 可选填"这段话说了什么"。创建后在 **音色** 下拉里选它，朗读就会走 `mimo-v2.5-tts-voiceclone`。
+
+音色库在 `%DSH_HOME%\voice-chat\voices\<音色名>\`，每个音色一个目录，里面是 `ref_audio.wav|mp3` + `ref_text.txt` + `meta.json`。想批量添加就直接建目录放文件，刷新设置面板即可看到。
+
+---
+
+## 5. 工作原理
+
+```
+浏览器（DSH Web GUI，同源）
+ ├ 语音水珠     conversation.input.dock   透明胶球 → 点开碎成四颗功能小珠
+ └ 回复监听器   conversation.input.left   读 assistant 流式文本 → 逐句 TTS → FIFO 播放
+        │  fetch /dsh-voice/*      （同源，无 CORS，无第二个端口）
+        ▼
+DSH Host 进程（插件 index.js）
+ ├ WebServer 前缀路由 /dsh-voice  →  仅回环 + 同站点校验
+ ├ 模型资产管理  lib/assets.js      固定 size + SHA-256，HF → hf-mirror 回退
+ ├ 克隆音色库    lib/voices.js      <dataRoot>/voices/<名>/
+ └ SttService    lib/stt.js  ──spawn(Electron-as-node)──▶ lib/worker.js 子进程
+                                                            └ sherpa-onnx: SenseVoice
+                                                            └ onnxruntime-node: FireRedVAD
+```
+
+**为什么 STT 放子进程**：原生推理崩溃或吃爆内存时，死掉的是一次性子进程而不是 DSH 本体；静默 5 分钟后回收约 250 MB 常驻内存。
+
+**为什么插话检测在浏览器侧**：等一次网络往返判断"用户开口了"会给每次打断加几百毫秒。本地 RMS 门限（AEC + 噪声门 + 220 ms 保持）负责即时打断；宿主侧 FireRedVAD 负责**认定这段音频里到底有没有人说话**——所以噪声误触发的录音会在识别之前就被丢掉，不会变成幽灵消息。
+
+> **打断时的 400 ms 预滚**：门限需要持续 220 ms 才敢确认"用户真的开口了"，如果确认那一刻才开始录音，这句话的**第一个字就已经过去了**。实测里表现得很清楚——打断那次的识别结果是 `妈听。哎，现在你真的停了…`，开头两个字是被切掉后语音模型对残片作出的猜测。所以打断模式下会一直保留最近 400 ms 的音频，触发时把它接回录音开头。这是客户端改动，改完**刷新页面**才生效。
+
+**为什么 API Key 只在宿主**：Key 永不下发到页面，浏览器只调用同源的 `/dsh-voice/tts`。
+
+### FireRedVAD 是怎么跑起来的
+
+sherpa-onnx **任何版本都不支持 FireRedVAD**（C API 只认 Silero 和 TEN-VAD，上游支持 PR #3392 至今未合并），所以本插件直接跑官方 ONNX 图，并把周边管线用 JS 重写：
+
+```
+波形 → Kaldi 兼容 80 维 log-mel fbank → CMVN
+     → FSMN 流式图（带 8×128×19 缓存，10 ms 一帧）→ 逐帧语音概率 → 端点状态机
+```
+
+数值约定全部取自上游源码（`audio_feat.py` / `stream_vad_postprocessor.py`）而非猜测。实现中有三个**踩过的坑**，改动前请先读 `lib/firered-vad.js` 与 `lib/sherpa.js` 的注释：
+
+1. **样本必须先缩放 32768 倍**。Kaldi 特征前端是按 int16 幅度域标定的（kaldi 的波形读取器直接把 int16 值喂进去），喂归一化到 [-1,1] 的浮点会让每个 log-mel 值整体下移 `ln(32768²) ≈ 20.8`，模型于是对**所有**输入都判"不是语音"（实测：清晰语音上非流式图峰值只有 0.004）。
+2. **必须比 sherpa-onnx 先加载 onnxruntime-node**。两者都带一个叫 `onnxruntime.dll` 的文件，Windows 按文件名绑定已加载的同名 DLL：先加载 sherpa 会钉住它那份旧版本，之后 onnxruntime-node 的绑定直接 `ERR_DLOPEN_FAILED`（"The operating system cannot run %1"）。已验证反过来加载时两个运行时都能正常工作。
+3. **原生依赖要靠 DSH 告诉插件它在哪**。`dsh plugin add <路径>` 用 `link:` 把插件链进 profile，插件的真实文件仍在用户自己的目录里；Node 从**真实路径**向上查找，永远进不了 profile 的 `node_modules`。所以 Host 半区从 DSH 自己的 `profileContext` 服务读 profile 目录，把解析根随 payload 传给子进程（`lib/sherpa.js: setModuleAnchors`）。`GET /dsh-voice/diag` 会把实际解析结果显示出来。
+4. **别把缺失的 VAD 模型交给 sherpa**。sherpa-onnx 的 C++ 层在 VAD 文件不存在时会直接 `exit(-1)`，JS 层 `try/catch` 拦不住，整个识别进程会静默消失。所以 `lib/vad.js` 在构造前先 `existsSync`，缺文件就走可捕获的错误路径。
+
+### 降级策略
+
+`vadBackend` 默认 `firered`。只要 FireRedVAD 起不来（onnxruntime 没装、模型缺失、数值不过闸），插件**不会静默换掉**，而是：
+
+- 自动回退到 `ten`（TEN-VAD，再不行 `silero`），
+- 在**设置面板**和 `GET /dsh-voice/state` 的 `vadNote` 里**写明实际用的是哪个 VAD 以及原因**。
+
+---
+
+## 6. HTTP 接口（`/dsh-voice`，仅回环 + 同站点）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/state` | 引擎就绪度、模型准备进度、音色表、配置摘要 |
+| POST | `/stt?language=zh` | 16 kHz 单声道 PCM16 或 WAV → `{ text, segments, speechSeconds, inferenceSeconds }` |
+| POST | `/tts` | `{ text, voice }` → 音频字节 |
+| POST | `/tts/plan` | 同上但只回答"会发什么请求"，不联网、不返回音频 |
+| GET | `/voices` | 音色列表 + MiMo 预设音色 |
+| POST | `/voices` | `{ name, filename, refText, dataBase64 }` 新建/覆盖音色 |
+| DELETE | `/voices?name=` | 删除音色 |
+| GET | `/voices/sample?name=` | 参考音频字节（设置面板用它试听） |
+| POST | `/prepare` | 启动模型下载（立即 202，进度看 `/state`） |
+| POST | `/config` | 白名单字段持久化：`voice/apiKey/baseUrl/provider/model/cloneModel/format/instruction/language/vadBackend` |
+| GET | `/diag` | 原生模块解析报告：试过哪些解析根、每个根的结果，以及 worker 状态 |
+
+`/diag` 是排查"FireRedVAD 为什么没生效"的第一站。它回答的是这个部署里唯一无法从外部确认的问题——插件的原生依赖到底从哪儿解析：
+
+```powershell
+curl.exe -s http://127.0.0.1:19387/dsh-voice/diag
+```
+
+看 `modules.onnxruntime.resolvedFrom`：应当是**profile 目录的 `package.json`**（插件被 `dsh plugin add <路径>` 以 `link:` 方式装进 profile 时，依赖装在 profile 的 `node_modules` 里）。`sherpa-onnx-node` 则应当解析到 **DSH 安装目录**里的那一份。
+
+---
+
+## 7. 配置项
+
+配置写在 bundle 的 `cordis.patch.yml`（或 profile patch 里按行 id `voice-chat` 覆盖）：
+
+```yaml
+stt:
+  vadBackend: firered      # firered | ten | silero
+  vadFallback: ten         # firered 不可用时用哪个
+  language: auto           # auto | zh | en | yue | ja | ko
+  precision: int8          # int8(228MB) | fp32(938MB)
+  threads: 2               # CPU 推理线程
+  vadThreshold: 0.5        # 语音概率阈值
+  minSpeechSeconds: 0.25   # 短于此不算一句话
+  minSilenceSeconds: 0.35  # 静音多久判定说完（FireRedVAD 端点）
+  maxSpeechSeconds: 30     # 单段上限，超过强制切分
+  idleTimeoutMs: 300000    # 空闲多久回收 worker（0 = 常驻）
+  modelDirectory: null     # 用已有 SenseVoice 目录（含 model.int8.onnx + tokens.txt）
+tts:
+  provider: mimo           # mimo | openai-speech | dev-tone
+  model: mimo-v2.5-tts
+  cloneModel: mimo-v2.5-tts-voiceclone
+  baseUrl: https://api.xiaomimimo.com/v1
+  voice: mimo_default
+  format: wav              # wav | mp3
+  apiKeyEnv: MIMO_API_KEY
+  maxChars: 1200           # 单次朗读文本上限
+```
+
+浏览器侧的偏好存在 localStorage：`dsh.voice.enabled`（朗读）、`dsh.voice.interrupt`（插话/排队）、`dsh.voice.voice`（音色）、`dsh.voice.language`（识别语言）。
+
+---
+
+## 8. 排错
+
+| 现象 | 原因 / 处理 |
+|---|---|
+| **改了插件代码但没生效** | 分三种情况：`index.js` / `lib/*.js`（Host 半区）**保存即热重载**，数百毫秒生效（见 DEVELOPING §2）；`client.js`（浏览器半区）**必须刷新页面**（F12 → Ctrl+R）；`package.json` 的清单字段（如 `dsh.client.inject`）**必须重启 DSH**。注意「停用再启用插件行」是另一条路径——它只重挂配置、不重新导入模块，既不能替代热重载，也不能替代重启 |
+| 工具行显示 **⚠ 语音模型未就绪** | 点开设置面板 → **下载并准备本地模型**（首次约 240 MB）。胶球本身也会变琥珀色 |
+| `下载失败：所有源都不可用` | huggingface.co 与 hf-mirror.com 都不通。可在 `config.stt.modelDirectory` 指向已有的 SenseVoice 目录 |
+| 设置面板里 `断句 VAD` 不是 `firered` | 先用 `GET /dsh-voice/diag` 看 `modules.onnxruntime` 的解析结果和 `attempts`（每个解析根失败的原因都在里面），再看同一行的 `vadNote`。装不上只会降级，不影响使用 |
+| `/diag` 返回 404 | 说明 Host 半区还是旧代码，重启 DSH |
+| 朗读报 `未配置小米 MiMo API Key` | 设 `MIMO_API_KEY` 或在设置面板填 Key |
+| 说话没反应 | ① 点一下胶球展开，看麦克风那颗是否变红（聆听中）；② 识别语言是否匹配；③ 麦克风权限被拒时错误会显示在胶球右侧 |
+| 说完了不发出去 | 停顿要够（约 0.9 秒静音）；太短的句子会被 FireRedVAD 当噪声丢掉 |
+| 朗读把代码也念了 | 代码块、行内代码、URL、markdown 标记在朗读前都会被剥掉；若仍有残留请提 issue |
+| 一打开会话就把历史念一遍 | 不会。回复监听器以"第一个已结束的回复"为基线，基线之前的内容永不朗读 |
+| 打断太灵敏/太迟钝 | `lib/` 未暴露配置；默认阈值（振幅 0.06、持续 220 ms）对耳机+回声消除最稳。外放音箱会更容易误触发 |
+| 想彻底停掉语音 | 停掉麦克风 + 关掉朗读那颗小珠；或停用插件（会注销路由并杀掉 worker） |
+| 点开胶球后四颗小珠被裁掉一半 | 四颗小珠是绝对定位溢出的，如果 DSH 的输入区容器加了 `overflow: hidden` 就会裁切。给 `.dshv-spread` 所在的容器去掉裁切，或把 `.dshv` 提到更高层 |
+| 朗读时胶球不变形 | 变形依赖 `AnalyserNode`。若浏览器把音频输出整体交给了系统独占通道（少见），响度会一直是 0；此时胶球仍会震动，只是不再跟着音量起伏 |
+
+---
+
+## 9. 已知限制
+
+- **Windows x64 优先**。sherpa-onnx 原生包覆盖 macOS/Linux，但本插件的路径解析、SAPI 测试脚本与实测都在 Windows x64 上完成。
+- **FireRedVAD 依赖 `onnxruntime-node`**（约 287 MB，自带 win32/x64 预编译二进制）。没有它就只能用 TEN-VAD/Silero。
+- **不是流式识别**：一句话说完才识别，没有逐词上屏。
+- **TTS 走公网**：小米 MiMo 是云服务，需要 Key、按量计费、有网络依赖。想全离线得换成本地 TTS。
+- **克隆音色不落盘到云端**：参考音频只在本机 `<dataRoot>/voices/`，但每次合成都会把它 base64 发给 MiMo（这是它零样本克隆的接口形状决定的）。
+- **单实例**：一个 DSH 进程一个 voice worker；不支持同一 profile 多会话并发录音。
+- **打断用本地 RMS**，靠浏览器 AEC 抑制回声。外放/扬声器场景建议戴耳机。
+
+---
+
+## 10. 文件地图
+
+```
+dsh-voice-chat/
+├── package.json            插件清单：dsh.bundle.patch + dsh.client(web) + onnxruntime-node 依赖
+├── cordis.patch.yml        插入一行 Host 插件（行名必须等于包名）
+├── index.js                Host 半区：配置、路由注册、worker 生命周期、模型准备
+├── client.js               浏览器半区：工具行 + 回复监听 + 麦克风采集 + FIFO 播放（单文件、无构建）
+├── icon.svg / locale/*.json 展示元信息
+└── lib/
+    ├── assets.js           模型清单 + 下载校验（size + SHA-256，HF/hf-mirror 回退）
+    ├── firered-vad.js      FireRedVAD：fbank + CMVN + ONNX 流式推理 + 端点状态机
+    ├── vad.js              VAD 后端选择与降级（firered / ten / silero）
+    ├── engine.js           识别引擎装配（含原生库加载顺序这一关键约束）
+    ├── worker.js           子进程入口：私有回环 HTTP + bearer token
+    ├── stt.js              worker 生命周期（懒启动、串行化、空闲回收、崩溃重启）
+    ├── tts.js              MiMo / OpenAI 兼容 / dev-tone 三个适配器 + 请求描述
+    ├── voices.js           克隆音色库（含路径穿越防护）
+    ├── routes.js           /dsh-voice 路由分发 + 回环/同站点校验 + 状态码映射
+    ├── sherpa.js           原生模块解析（插件依赖 → DSH 安装目录锚点）
+    └── util.js             WAV 编解码、原子写、流式下载、日志
+```
+
+---
+
+## 11. 开发与验证
+
+**本仓库只含插件本体**，不含开发脚本 —— 验证脚手架要跑真模型、真 Host 进程，
+随插件分发没有意义。下面是发布前实际跑过的校验基线，**改动后请勿让这些数字下降**。
+
+当前状态（Windows x64 实测，共 52 项）：
+
+| 套件 | 结果 |
+|---|---|
+| 单元测试 | 18 / 18（含"浏览器半区 `apply()` 能跑通并注册两个 seat"与胶球几何） |
+| HTTP 契约 | 12 / 12 |
+| Bundle 清单 / patch 静态校验 | 一致 |
+| FireRedVAD 数值闸门 | PASS（语音均值 0.709 / 覆盖率 86.3%，噪声与静音均 0 段） |
+| worker 端到端（真模型） | 7 / 7，含"FireRedVAD 不可用时降级到 sherpa 仍能正确识别"这一条回归 |
+| **活体验证（对运行中的 DSH GUI）** | **14 / 14** |
+
+端到端识别结果（7.59 秒 SAPI 中文语音，FireRedVAD 主路径与 ten-vad 降级路径都实测）：
+
+> **"你好。这是一段用于测试语音识别的中文录音。今天天气不错。"**
+
+推理耗时 0.71~0.87 秒（约 10 倍实时）；白噪声与数字静音均返回空文本、零语音段。
+
+活体验证覆盖：插件已挂载且 `vadBackendEffective=firered`、原生模块解析指向正确的两个根、
+真语音转写 + FireRedVAD 分段、worker 报告 `vad=firered` 且无降级说明、噪声/静音拒识、
+8 kHz 输入被拒、无 Key 时 TTS 明确报错、预设与克隆两条 `/tts/plan` 请求形状、
+克隆音色新建→列表→试听→删除→重复删除 404、dev-tone 离线合成可播放 WAV、
+配置持久化、跨源 403、浏览器半区模块注册正确。
+
+### 浏览器侧实测（真人对着麦克风，2026-10-12）
+
+`/dsh-voice/state` 的 `recentStt` 账本（每条记录：音频时长 / FireRedVAD 判定的人声时长 / 段数 / 识别文本）：
+
+```
+20:13:12  audio=6.36s  speech=4.51s  segs=2  text='测试一下。 12345。'
+20:13:18  audio=5.68s  speech=0.00s  segs=0  text=''
+```
+
+第一条说明整条闭环通了：麦克风采集 → FireRedVAD 在 6.36 秒音频里切出 **2 段共 4.51 秒人声**
+（文本中间那个空格正是两段拼接的位置）→ SenseVoice 准确转写 → 自动作为消息发出。
+第二条 5.7 秒后同一次操作里**没有人声**，FireRedVAD 判 0 段、文本为空、没有产生消息——拒识生效。
+
+同时实测确认：回复逐句朗读（`recent` 里两条成功合成相隔 35 秒）、
+用户自填 MiMo Key（`hasKey=true`）、切换到克隆音色后按该音色朗读。
+
+**插话打断也已实测通过**（2026-10-12 20:15–20:16）：回复以克隆音色逐句合成 8 次
+（`20:15:44` 起，约每 1.5~5 秒一句），用户开口后**后续句子不再合成**，
+31 秒内 `recent` 无新增——剩余朗读被中止；紧接着 `20:16:47` 出现打断那句话的识别记录。
+这次实测同时暴露并修掉了"第一个字被切掉"的问题（见上文 400 ms 预滚）。
+
+> `probe/verify/vad-backends.mjs` 还会在独立子进程里逐个验证 `ten` / `silero` 后端是否可用——因为 sherpa 的 C++ 层在模型不对时直接 `exit(-1)`，只能靠子进程隔离来观察结果。
+
+## 许可
+
+MIT。FireRedVAD 模型与代码为 Apache-2.0（小红书 FireRedTeam）；SenseVoiceSmall 走 sherpa-onnx（Apache-2.0）。

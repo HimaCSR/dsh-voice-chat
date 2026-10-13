@@ -1,0 +1,11 @@
+# 统一按文本处理，仓库内存 LF；工作区保持原样，避免行尾噪声淹没真正的改动。
+* text=auto
+
+# 明确的二进制，禁止行尾转换
+*.png binary
+*.jpg binary
+*.mp3 binary
+*.wav binary
+*.woff2 binary
+*.onnx binary
+*.ark binary

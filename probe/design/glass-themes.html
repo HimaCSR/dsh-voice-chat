@@ -1,0 +1,747 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DSH-Voice 主题方案 A / B / C（磨砂玻璃 · 透明胶球）</title>
+<style>
+/* ═══════════════════════════════════════════════════════════════════════
+   DSH 真实令牌（取自 app.asar 的 dsh-client-ui-theme），负责文字与主题跟随。
+   玻璃材质自成一套，只借用 DSH 的文字色，保证亮暗都可读。
+   ═══════════════════════════════════════════════════════════════════════ */
+:root{
+  --dsw-font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",Helvetica,Arial,sans-serif;
+  --dsw-static-neutral-bluish-50:#f9fafb;
+  --dsw-static-neutral-bluish-300:#cfd3d6;
+  --dsw-static-neutral-bluish-400:#adb2b8;
+  --dsw-static-neutral-bluish-600:#81858c;
+  --dsw-static-neutral-bluish-700:#61666b;
+  --dsw-static-neutral-bluish-1000:#0f1115;
+
+  --dsw-alias-label-primary:var(--dsw-static-neutral-bluish-1000);
+  --dsw-alias-label-secondary:var(--dsw-static-neutral-bluish-700);
+  --dsw-alias-label-tertiary:var(--dsw-static-neutral-bluish-600);
+  --dsw-alias-state-success-primary:#22c55e;
+
+  /* ── 磨砂玻璃材质（iOS 控制中心）──────────────────────────────
+     亮色：白色凝霜 + 深色图形；暗色：白色薄雾 + 白色图形。      */
+  --glass-blur:blur(30px) saturate(180%);
+  --glass-bg:rgba(255,255,255,.58);
+  --glass-bg-strong:rgba(255,255,255,.86);
+  --glass-stroke:rgba(255,255,255,.72);
+  --glass-inner:rgba(255,255,255,.85);
+  --glass-shadow:0 10px 32px rgba(0,0,0,.14);
+  --field-bg:rgba(120,120,128,.12);
+  --sep:rgba(120,120,128,.22);
+
+  --fill-accent:#007aff;
+  --fill-record:#ff3b30;
+  --fill-warn:#ff9f0a;
+
+  --bead-tint:rgba(150,162,178,.17);
+  --ripple-ink:rgba(96,132,176,.74);
+  --bead-rim:rgba(255,255,255,.95);
+  --bead-shade:rgba(60,70,90,.20);
+}
+body[data-ds-dark-theme]{
+  --dsw-alias-label-primary:var(--dsw-static-neutral-bluish-50);
+  --dsw-alias-label-secondary:var(--dsw-static-neutral-bluish-300);
+  --dsw-alias-label-tertiary:var(--dsw-static-neutral-bluish-400);
+  --dsw-alias-state-success-primary:#4ed17e;
+
+  --glass-bg:rgba(255,255,255,.14);
+  --glass-bg-strong:rgba(255,255,255,.90);
+  --glass-stroke:rgba(255,255,255,.18);
+  --glass-inner:rgba(255,255,255,.22);
+  --glass-shadow:0 12px 36px rgba(0,0,0,.44);
+  --field-bg:rgba(255,255,255,.12);
+  --sep:rgba(255,255,255,.16);
+
+  --fill-accent:#0a84ff;
+  --fill-record:#ff453a;
+  --fill-warn:#ff9f0a;
+
+  --bead-tint:rgba(255,255,255,.10);
+  --ripple-ink:rgba(205,235,255,.72);
+  --bead-rim:rgba(255,255,255,.60);
+  --bead-shade:rgba(0,0,0,.34);
+}
+
+*{box-sizing:border-box}
+html,body{margin:0}
+body{font-family:var(--dsw-font-family);font-size:13px;line-height:1.55;background:#fff;color:var(--dsw-alias-label-primary)}
+body[data-ds-dark-theme]{background:#151517}
+header.top{
+  position:sticky;top:0;z-index:50;display:flex;flex-wrap:wrap;align-items:center;gap:14px;
+  padding:12px 18px;background:#fff;border-bottom:1px solid rgba(120,120,128,.2);
+}
+body[data-ds-dark-theme] header.top{background:#151517;border-bottom-color:rgba(255,255,255,.12)}
+header.top h1{font-size:14px;margin:0;font-weight:600}
+.ctl{display:flex;align-items:center;gap:6px}
+.ctl>span{color:var(--dsw-alias-label-secondary);font-size:12px}
+.seg{display:inline-flex;border:1px solid rgba(120,120,128,.28);border-radius:999px;overflow:hidden}
+body[data-ds-dark-theme] .seg{border-color:rgba(255,255,255,.2)}
+.seg button{border:0;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;padding:5px 11px;cursor:pointer}
+.seg button[aria-pressed="true"]{background:var(--fill-accent);color:#fff}
+.hint{color:var(--dsw-alias-label-tertiary);font-size:12px;margin-left:auto}
+
+main{display:flex;gap:18px;padding:18px;align-items:flex-start;flex-wrap:wrap;background:#fff}
+body[data-ds-dark-theme] main{background:#151517}
+.col{flex:1 1 360px;min-width:352px;max-width:460px}
+.col>h2{font-size:13px;margin:0 0 2px;font-weight:600}
+.col>p.sub{margin:0 0 10px;color:var(--dsw-alias-label-secondary);font-size:12px;min-height:52px}
+
+/* 舞台：模拟会话背景。玻璃要有东西可糊，所以底下放气泡和色块。 */
+.stage{
+  border-radius:20px;overflow:hidden;
+  border:1px solid rgba(120,120,128,.22);
+  padding:14px 14px 10px;display:flex;flex-direction:column;gap:12px;min-height:640px;
+  background:
+    radial-gradient(90% 60% at 8% 4%,rgba(120,180,255,.30),transparent 60%),
+    radial-gradient(80% 55% at 96% 90%,rgba(255,170,120,.26),transparent 62%),
+    linear-gradient(160deg,#f7f8fb,#eef1f6);
+}
+body[data-ds-dark-theme] .stage{
+  border-color:rgba(255,255,255,.14);
+  background:
+    radial-gradient(90% 60% at 8% 4%,rgba(60,110,200,.34),transparent 60%),
+    radial-gradient(80% 55% at 96% 90%,rgba(190,90,60,.26),transparent 62%),
+    linear-gradient(160deg,#20222a,#141519);
+}
+.bubble{max-width:78%;padding:8px 12px;border-radius:16px;font-size:12px;line-height:1.5}
+.bubble.user{align-self:flex-end;background:rgba(120,120,128,.22);color:var(--dsw-alias-label-primary)}
+.bubble.bot{align-self:flex-start;background:rgba(255,255,255,.66);color:var(--dsw-alias-label-secondary);border:1px solid rgba(255,255,255,.7)}
+body[data-ds-dark-theme] .bubble.bot{background:rgba(255,255,255,.10);border-color:rgba(255,255,255,.12)}
+.spacer{flex:1}
+
+/* ─────────────────────────────── 毛玻璃设置面板（三套共用材质）── */
+.panel{
+  width:100%;padding:14px;border-radius:26px;font-size:12px;
+  background:var(--glass-bg);
+  backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);
+  border:1px solid var(--glass-stroke);
+  box-shadow:var(--glass-shadow),inset 0 1px 0 var(--glass-inner);
+  color:var(--dsw-alias-label-primary);
+}
+.panel .phead{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.panel .phead strong{font-size:13px}
+.panel .row{display:flex;align-items:center;gap:6px;margin:6px 0}
+.panel .label{min-width:58px;flex:none;color:var(--dsw-alias-label-secondary)}
+.panel .kv{color:var(--dsw-alias-label-secondary)}
+.panel .sect{margin-top:10px;padding-top:9px;border-top:1px solid var(--sep)}
+.panel .note{font-size:11px;color:var(--dsw-alias-label-tertiary)}
+.panel input,.panel select{
+  font:inherit;font-size:12px;height:30px;padding:0 10px;width:100%;
+  border:1px solid transparent;border-radius:11px;background:var(--field-bg);
+  color:var(--dsw-alias-label-primary);
+}
+.panel input::placeholder{color:var(--dsw-alias-label-tertiary)}
+.panel input:focus,.panel select:focus{outline:2px solid var(--fill-accent);outline-offset:1px}
+.panel button{
+  font:inherit;font-size:12px;height:30px;padding:0 13px;cursor:pointer;
+  border:1px solid transparent;border-radius:11px;background:var(--field-bg);
+  color:var(--dsw-alias-label-primary);
+}
+.panel button:hover{background:rgba(120,120,128,.24)}
+body[data-ds-dark-theme] .panel button:hover{background:rgba(255,255,255,.2)}
+.panel button.primary{background:var(--fill-accent);color:#fff}
+.panel .grow{flex:1;min-width:0}
+.ok{color:var(--dsw-alias-state-success-primary)}
+
+/* ─────────────────────────────────────────────── 图标（单色线性）── */
+.ic{width:22px;height:22px;display:block;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.ic.sm{width:19px;height:19px}
+
+/* ───────────────────────────────── 底部：输入框 + 语音入口（共用）── */
+.dock{position:relative;margin-top:auto;padding-top:186px}
+.composer{
+  display:flex;align-items:center;gap:8px;padding:10px 12px;font-size:12px;
+  border-radius:20px;border:1px solid var(--glass-stroke);
+  background:var(--glass-bg);
+  backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);
+  box-shadow:var(--glass-shadow),inset 0 1px 0 var(--glass-inner);
+  color:var(--dsw-alias-label-tertiary);
+}
+.composer .fake{flex:1}
+.anchor{position:absolute;right:18px;bottom:46px}
+.orbwrap{position:relative;width:56px;height:56px}
+.orb{
+  position:absolute;inset:0;width:56px;height:56px;border-radius:50%;
+  display:grid;place-items:center;cursor:pointer;padding:0;font:inherit;
+  border:1px solid var(--glass-stroke);background:var(--glass-bg);
+  backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);
+  box-shadow:var(--glass-shadow),inset 0 1px 0 var(--glass-inner);
+  color:var(--dsw-alias-label-primary);
+  transition:transform .3s cubic-bezier(.34,1.3,.64,1),opacity .3s ease,background .2s ease;
+}
+.orb:focus-visible{outline:2px solid var(--fill-accent);outline-offset:3px}
+
+/* 展开态：功能项从球心散出 */
+.spread{position:absolute;right:0;bottom:0;width:0;height:0}
+.node{
+  position:absolute;right:28px;bottom:28px;
+  display:flex;flex-direction:column;align-items:center;gap:5px;
+  transform:translate(0,0) scale(.4);opacity:0;pointer-events:none;
+  transition:transform .42s cubic-bezier(.32,1.35,.6,1),opacity .26s ease;
+}
+[data-expanded="true"] .node{transform:translate(var(--tx),var(--ty)) scale(1);opacity:1;pointer-events:auto}
+[data-expanded="true"] .node:nth-child(2){transition-delay:.03s}
+[data-expanded="true"] .node:nth-child(3){transition-delay:.09s}
+[data-expanded="true"] .node:nth-child(4){transition-delay:.15s}
+[data-expanded="true"] .orb{transform:scale(.38);opacity:0}
+.node .cap{font-size:11px;white-space:nowrap;color:var(--dsw-alias-label-secondary)}
+
+/* 单个磨砂圆钮 */
+.gbtn{
+  width:48px;height:48px;border-radius:50%;display:grid;place-items:center;
+  border:1px solid var(--glass-stroke);background:var(--glass-bg);
+  backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);
+  box-shadow:var(--glass-shadow),inset 0 1px 0 var(--glass-inner);
+  color:var(--dsw-alias-label-primary);
+}
+
+/* ────────────────── 方案 A：一排独立圆钮（参考图底部那一排）── */
+.th-a .dock[data-state="listening"] .n-mic .gbtn{background:var(--fill-record);border-color:transparent;color:#fff}
+.th-a .dock[data-state="recognizing"] .n-mic .gbtn{background:var(--fill-warn);border-color:transparent;color:#fff}
+.th-a .dock[data-state="speaking"] .n-speak .gbtn,
+.th-a .dock[data-state="idle"] .n-speak .gbtn,
+.th-a .dock[data-state="listening"] .n-speak .gbtn{background:var(--fill-accent);border-color:transparent;color:#fff}
+.th-a .dock[data-state="idle"] .n-inter .gbtn,
+.th-a .dock[data-state="listening"] .n-inter .gbtn,
+.th-a .dock[data-state="speaking"] .n-inter .gbtn{background:var(--fill-accent);border-color:transparent;color:#fff}
+
+/* ────────────────── 方案 B：连成一体的控制组（参考图左上角）── */
+.th-b .spread{
+  right:18px;bottom:66px;width:auto;height:auto;
+  display:flex;gap:8px;padding:9px;border-radius:28px;
+  border:1px solid var(--glass-stroke);background:var(--glass-bg);
+  backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);
+  box-shadow:var(--glass-shadow),inset 0 1px 0 var(--glass-inner);
+  transform:translateY(12px) scale(.9);opacity:0;pointer-events:none;
+  transition:transform .34s cubic-bezier(.32,1.3,.6,1),opacity .24s ease;
+}
+.th-b .dock[data-expanded="true"] .spread{transform:translateY(0) scale(1);opacity:1;pointer-events:auto}
+.th-b .node{display:none}
+.th-b .dock[data-expanded="true"] .orb{transform:none;opacity:1;background:var(--glass-bg);color:var(--dsw-alias-label-primary)}
+.th-b .cell{
+  width:52px;height:52px;border-radius:50%;display:grid;place-items:center;
+  background:rgba(120,120,128,.14);color:var(--dsw-alias-label-primary);
+  border:1px solid rgba(255,255,255,.28);
+}
+body[data-ds-dark-theme] .th-b .cell{background:rgba(255,255,255,.12);border-color:rgba(255,255,255,.14)}
+.cell-txt{display:flex;flex-direction:column;align-items:center;gap:4px}
+.cell-txt small{font-size:10.5px;color:var(--dsw-alias-label-secondary)}
+.th-b .dock[data-state="listening"] .c-mic{background:var(--fill-record);border-color:transparent;color:#fff}
+.th-b .dock[data-state="recognizing"] .c-mic{background:var(--fill-warn);border-color:transparent;color:#fff}
+.th-b .dock[data-state="idle"] .c-speak,.th-b .dock[data-state="listening"] .c-speak,
+.th-b .dock[data-state="speaking"] .c-speak{background:var(--fill-accent);border-color:transparent;color:#fff}
+.th-b .dock[data-state="idle"] .c-inter,.th-b .dock[data-state="listening"] .c-inter,
+.th-b .dock[data-state="speaking"] .c-inter{background:var(--fill-accent);border-color:transparent;color:#fff}
+
+/* ────────── 方案 C：无色透明大水珠 / 半透明胶球（不带蓝色）── */
+.th-c .orb,.th-c .node .gbtn{
+  position:relative;border:0;background:transparent;
+  backdrop-filter:none;-webkit-backdrop-filter:none;box-shadow:none;
+}
+.th-c .orb::before,.th-c .node .gbtn::before{
+  content:"";position:absolute;inset:0;border-radius:inherit;
+  background:
+    radial-gradient(circle at 34% 23%,rgba(255,255,255,.98) 0 5%,rgba(255,255,255,.55) 12%,rgba(255,255,255,.10) 30%,rgba(255,255,255,0) 56%),
+    radial-gradient(circle at 28% 76%,rgba(255,255,255,.30),rgba(255,255,255,0) 46%),
+    radial-gradient(circle at 74% 82%,rgba(255,255,255,.30),rgba(255,255,255,0) 50%),
+    var(--bead-tint);
+  backdrop-filter:blur(9px) saturate(150%);-webkit-backdrop-filter:blur(9px) saturate(150%);
+  box-shadow:
+    inset 0 1.5px 2px var(--bead-rim),
+    inset 0 -12px 20px rgba(255,255,255,.20),
+    inset 0 0 0 1px rgba(255,255,255,.45),
+    0 10px 24px var(--bead-shade),
+    0 2px 5px rgba(0,0,0,.10);
+}
+.th-c .orb::after,.th-c .node .gbtn::after{
+  content:"";position:absolute;left:50%;bottom:6%;
+  width:calc(46% + var(--lvl,0) * 26%);height:calc(16% + var(--lvl,0) * 8%);
+  transform:translateX(-50%);border-radius:50%;pointer-events:none;
+  background:radial-gradient(closest-side,rgba(255,255,255,.72),rgba(255,255,255,0));
+}
+.th-c .node .gbtn{width:46px;height:46px}
+.th-c .node .gbtn .ic,.th-c .orb .ic{position:relative;z-index:1}
+/* 打开时不给珠子上色，只把图形换强调色，保持透明感 */
+.th-c .node .gbtn.on::before,.th-c .node .gbtn.rec::before{
+  background:var(--glass-bg-strong);
+  box-shadow:inset 0 1px 1px rgba(255,255,255,.95),0 8px 22px var(--bead-shade);
+}
+.th-c .dock[data-state="idle"] .n-speak .gbtn,.th-c .dock[data-state="listening"] .n-speak .gbtn,
+.th-c .dock[data-state="speaking"] .n-speak .gbtn{color:var(--fill-accent)}
+.th-c .dock[data-state="idle"] .n-inter .gbtn,.th-c .dock[data-state="listening"] .n-inter .gbtn,
+.th-c .dock[data-state="speaking"] .n-inter .gbtn{color:var(--fill-accent)}
+.th-c .dock[data-state="listening"] .n-mic .gbtn{color:var(--fill-record)}
+.th-c .dock[data-state="recognizing"] .n-mic .gbtn{color:var(--fill-warn)}
+/* 待机：轮廓按不规则的关键帧缓缓起伏，像水面自己在那里晃 */
+@keyframes swell{
+  0%,100%{border-radius:50% 50% 50% 50%/50% 50% 50% 50%}
+  18%{border-radius:46% 54% 51% 49%/52% 47% 53% 48%}
+  36%{border-radius:52% 48% 47% 53%/48% 54% 46% 52%}
+  54%{border-radius:49% 51% 55% 45%/45% 51% 49% 55%}
+  72%{border-radius:54% 46% 48% 52%/53% 48% 52% 47%}
+  88%{border-radius:48% 52% 50% 50%/49% 53% 47% 51%}
+}
+.th-c .orb{animation:swell 9.3s ease-in-out infinite}
+.th-c .dock[data-state="listening"] .orb{animation:swell 4.1s ease-in-out infinite,tremble .26s linear infinite}
+.th-c .dock[data-state="recognizing"] .orb{animation:swell 2.3s ease-in-out infinite,tremble .15s linear infinite}
+/* 朗读：交给 JS 每帧算 —— 四组互质频率叠加，幅度随音量，
+   没有高光游走、没有频率抖动，只有浪一样此起彼伏的轮廓 */
+.th-c .dock[data-state="speaking"] .orb{animation:tremble .3s linear infinite}
+.gelwrap{
+  position:absolute;inset:0;display:block;will-change:transform;
+  transform:scale(calc(1 + var(--lvl,0) * .045));
+}
+@keyframes caustic{0%,100%{opacity:.5}50%{opacity:.95}}
+.th-c .dock[data-state="speaking"] .orb::after{animation:caustic 1.4s ease-in-out infinite}
+/* 水波纹：三圈同心涟漪从球面荡出去，彼此错开 1/3 周期，看着是连续的水波 */
+.th-c .orbwave,
+.th-c .orbwave::before,
+.th-c .orbwave::after{
+  content:"";position:absolute;inset:0;border-radius:50%;pointer-events:none;
+  border:2px solid var(--ripple-ink);opacity:0;
+}
+@keyframes rippleOut{
+  0%{transform:scale(1);opacity:.72}
+  60%{opacity:.22}
+  100%{transform:scale(2.05);opacity:0}
+}
+/* 球面自身的轻微震动：位移不到 1px，频率高，读作"水面在颤"而不是"在抖" */
+@keyframes tremble{
+  0%,100%{transform:translate(0,0)}
+  20%{transform:translate(.6px,-.45px)}
+  40%{transform:translate(-.5px,.35px)}
+  60%{transform:translate(.35px,.5px)}
+  80%{transform:translate(-.45px,-.3px)}
+}
+.th-c .dock[data-state="listening"] .orbwave,
+.th-c .dock[data-state="listening"] .orbwave::before,
+.th-c .dock[data-state="listening"] .orbwave::after{animation:rippleOut 2.4s ease-out infinite}
+.th-c .dock[data-state="listening"] .orbwave::before{animation-delay:.8s}
+.th-c .dock[data-state="listening"] .orbwave::after{animation-delay:1.6s}
+
+.th-c .dock[data-state="recognizing"] .orbwave,
+.th-c .dock[data-state="recognizing"] .orbwave::before,
+.th-c .dock[data-state="recognizing"] .orbwave::after{animation:rippleOut 1.35s ease-out infinite}
+.th-c .dock[data-state="recognizing"] .orbwave::before{animation-delay:.45s}
+.th-c .dock[data-state="recognizing"] .orbwave::after{animation-delay:.9s}
+
+.th-c .dock[data-state="speaking"] .orbwave,
+.th-c .dock[data-state="speaking"] .orbwave::before,
+.th-c .dock[data-state="speaking"] .orbwave::after{animation:rippleOut 1.9s ease-out infinite}
+.th-c .dock[data-state="speaking"] .orbwave::before{animation-delay:.63s}
+.th-c .dock[data-state="speaking"] .orbwave::after{animation-delay:1.27s}
+[data-expanded="true"] .orbwave{display:none}
+[data-expanded="true"] .orb{animation:none}
+
+/* 非 C 方案：球体本身用实心色表达状态 */
+[data-state="listening"] .orb{background:var(--fill-record);border-color:transparent;color:#fff}
+[data-state="recognizing"] .orb{background:var(--fill-warn);border-color:transparent;color:#fff}
+[data-state="notready"] .orb{background:var(--fill-warn);border-color:transparent;color:#fff}
+[data-expanded="true"] .orb{background:var(--glass-bg)!important;color:var(--dsw-alias-label-primary)!important}
+/* C 的球体永远透明：状态只改里面的图标颜色，绝不给球上色 */
+.th-c .orb{background:transparent!important;border-color:transparent!important}
+.th-c .dock[data-state="idle"] .orb,
+.th-c .dock[data-state="speaking"] .orb{color:var(--dsw-alias-label-primary)}
+.th-c .dock[data-state="listening"] .orb{color:var(--fill-record)}
+.th-c .dock[data-state="recognizing"] .orb{color:var(--fill-warn)}
+.th-c .dock[data-state="notready"] .orb{color:var(--fill-warn)}
+
+/* 对比度读数 */
+.readout{
+  margin-top:10px;padding:10px 12px;border-radius:16px;font-size:11.5px;
+  border:1px solid var(--sep);color:var(--dsw-alias-label-secondary);background:var(--field-bg);
+}
+.readout b{color:var(--dsw-alias-label-primary);font-weight:600}
+.readout .pass{color:var(--dsw-alias-state-success-primary)}
+.readout .fail{color:var(--fill-record)}
+
+@media (prefers-reduced-motion:reduce){*{animation:none!important}.node,.spread,.orb{transition-duration:.01ms!important}}
+</style>
+</head>
+<body>
+
+<!-- 单色线性图标：无外部资源；client.js 落地时同样用内联 SVG -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="i-mic" viewBox="0 0 24 24">
+    <rect x="9" y="2.6" width="6" height="10.6" rx="3"/>
+    <path d="M5.6 11.6a6.4 6.4 0 0 0 12.8 0"/><path d="M12 18v3.4"/>
+  </symbol>
+  <symbol id="i-speaker" viewBox="0 0 24 24">
+    <path d="M4 9.6h3.1L12 5.6v12.8l-4.9-4H4z"/>
+    <path d="M15.4 9.6a3.6 3.6 0 0 1 0 4.8"/><path d="M18.3 7.1a7.4 7.4 0 0 1 0 9.8"/>
+  </symbol>
+  <symbol id="i-bolt" viewBox="0 0 24 24">
+    <path d="M13.3 2.4 5.6 13.3h4.9l-1.1 8.3 8.1-11.2h-5z"/>
+  </symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="8"/><path d="M12 7.3V12l3.1 1.9"/>
+  </symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24">
+    <path d="M19.4 13a7.6 7.6 0 0 0 0-2l2-1.6-2-3.4-2.4 1a7.6 7.6 0 0 0-1.7-1L15 3.3h-4l-.3 2.7a7.6 7.6 0 0 0-1.7 1l-2.4-1-2 3.4 2 1.6a7.6 7.6 0 0 0 0 2l-2 1.6 2 3.4 2.4-1c.5.4 1.1.7 1.7 1l.3 2.7h4l.3-2.7c.6-.2 1.2-.6 1.7-1l2.4 1 2-3.4z"/>
+    <circle cx="12" cy="12" r="2.6"/>
+  </symbol>
+</defs></svg>
+
+<header class="top">
+  <h1>DSH-Voice 主题方案</h1>
+  <div class="ctl"><span>底色</span>
+    <div class="seg" id="mode">
+      <button data-v="light" aria-pressed="true">亮</button>
+      <button data-v="dark" aria-pressed="false">暗</button>
+    </div>
+  </div>
+  <div class="ctl"><span>状态</span>
+    <div class="seg" id="state">
+      <button data-v="idle" aria-pressed="true">待机</button>
+      <button data-v="listening" aria-pressed="false">聆听</button>
+      <button data-v="recognizing" aria-pressed="false">识别中</button>
+      <button data-v="speaking" aria-pressed="false">朗读中</button>
+      <button data-v="notready" aria-pressed="false">未就绪</button>
+    </div>
+  </div>
+  <div class="ctl"><span>菜单</span>
+    <div class="seg" id="expand">
+      <button data-v="false" aria-pressed="true">收起</button>
+      <button data-v="true" aria-pressed="false">展开</button>
+    </div>
+  </div>
+  <div class="ctl"><span>模拟音量</span><input id="lvl" type="range" min="0" max="100" value="0" style="width:132px"></div>
+  <div class="ctl"><label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--dsw-alias-label-secondary)"><input id="auto" type="checkbox" checked>自动包络</label></div>
+  <span class="hint">C 的球体始终透明，状态只改里面的图标；「朗读中」的起伏由音量实时驱动</span>
+</header>
+
+<main>
+
+  <!-- ═══════════════════ A：一排独立圆钮 ═══════════════════ -->
+  <section class="col th-a" data-theme="A">
+    <h2>A · 独立圆钮</h2>
+    <p class="sub">照参考图底部那一排：每个功能是一枚独立的磨砂圆钮，图形为单色线性图标，打开时整枚变实心。展开后四枚沿弧线散开，最贴近控制中心的观感。</p>
+    <div class="stage">
+      <div class="bubble user">把设置面板的字看清楚点</div>
+      <div class="bubble bot">面板改成磨砂玻璃，底下有内容时你会看到它被糊开。</div>
+      <div class="spacer"></div>
+
+      <div class="panel" data-fill="rgba(255,255,255,0.58)" data-stage="#eef1f6">
+        <div class="phead"><strong>DSH-Voice</strong><button>关闭</button></div>
+        <div class="row"><span class="label">识别</span><span class="kv">sensevoice-small · int8</span></div>
+        <div class="row"><span class="label">断句 VAD</span><span class="kv">firered</span></div>
+        <div class="row"><span class="label">TTS 服务</span><span class="kv">mimo</span></div>
+        <div class="row ok">● 语音引擎就绪</div>
+        <div class="sect">
+          <div class="row"><span class="label">音色</span>
+            <select class="grow"><option>mimo_default</option><option>011_关于我们的故事（克隆）</option></select></div>
+          <div class="row"><span class="kv grow">011_关于我们的故事 · 65 KB</span><button>删除</button></div>
+        </div>
+        <div class="sect">
+          <div class="row"><strong>新建克隆音色</strong></div>
+          <div class="row"><input placeholder="音色名"></div>
+          <div class="row"><input type="file"></div>
+          <div class="row"><span class="note">选择参考音频（wav/mp3，5~20 秒最稳）</span></div>
+          <div class="row"><button class="primary">创建</button></div>
+        </div>
+        <div class="sect">
+          <div class="row"><strong>MiMo API Key（留空则读 MIMO_API_KEY 环境变量）</strong></div>
+          <div class="row"><input class="grow" placeholder="sk-…"><button>保存</button></div>
+          <div class="row"><span class="label">语言</span><select class="grow"><option>auto</option></select></div>
+        </div>
+      </div>
+
+      <div class="dock" data-state="idle" data-expanded="false">
+        <div class="composer"><span class="fake">给 DSH 发消息…</span><span>◧</span><span>➤</span></div>
+        <div class="anchor"><div class="orbwrap">
+          <button class="orb" title="语音"><svg class="ic"><use href="#i-mic"/></svg></button>
+          <div class="spread">
+            <div class="node n-mic"   style="--tx:-142px;--ty:-8px"><span class="cap">麦克风</span><span class="gbtn"><svg class="ic sm"><use href="#i-mic"/></svg></span></div>
+            <div class="node n-speak" style="--tx:-96px;--ty:-48px"><span class="cap">朗读</span><span class="gbtn"><svg class="ic sm"><use href="#i-speaker"/></svg></span></div>
+            <div class="node n-inter" style="--tx:-46px;--ty:-70px"><span class="cap">插话</span><span class="gbtn"><svg class="ic sm"><use href="#i-bolt"/></svg></span></div>
+            <div class="node n-set"   style="--tx:6px;--ty:-74px"><span class="cap">设置</span><span class="gbtn"><svg class="ic sm"><use href="#i-gear"/></svg></span></div>
+          </div>
+        </div></div>
+      </div>
+    </div>
+    <div class="readout" data-readout></div>
+  </section>
+
+  <!-- ═══════════════════ B：连通控制组 ═══════════════════ -->
+  <section class="col th-b" data-theme="B">
+    <h2>B · 连通控制组</h2>
+    <p class="sub">照参考图左上角那一块：四项功能连在同一块圆角矩形磨砂组里，元素之间留细缝，整组一起出现。激活项变实心蓝，跟控制中心里打开的蓝牙 / WiFi 一致。</p>
+    <div class="stage">
+      <div class="bubble user">把设置面板的字看清楚点</div>
+      <div class="bubble bot">控制组是一整块玻璃，四枚圆钮嵌在里面。</div>
+      <div class="spacer"></div>
+
+      <div class="panel" data-fill="rgba(255,255,255,0.58)" data-stage="#eef1f6">
+        <div class="phead"><strong>DSH-Voice</strong><button>关闭</button></div>
+        <div class="row"><span class="label">识别</span><span class="kv">sensevoice-small · int8</span></div>
+        <div class="row"><span class="label">断句 VAD</span><span class="kv">firered</span></div>
+        <div class="row"><span class="label">TTS 服务</span><span class="kv">mimo</span></div>
+        <div class="row ok">● 语音引擎就绪</div>
+        <div class="sect">
+          <div class="row"><span class="label">音色</span>
+            <select class="grow"><option>mimo_default</option><option>011_关于我们的故事（克隆）</option></select></div>
+          <div class="row"><span class="kv grow">011_关于我们的故事 · 65 KB</span><button>删除</button></div>
+        </div>
+        <div class="sect">
+          <div class="row"><strong>新建克隆音色</strong></div>
+          <div class="row"><input placeholder="音色名"></div>
+          <div class="row"><input type="file"></div>
+          <div class="row"><span class="note">选择参考音频（wav/mp3，5~20 秒最稳）</span></div>
+          <div class="row"><button class="primary">创建</button></div>
+        </div>
+        <div class="sect">
+          <div class="row"><strong>MiMo API Key（留空则读 MIMO_API_KEY 环境变量）</strong></div>
+          <div class="row"><input class="grow" placeholder="sk-…"><button>保存</button></div>
+          <div class="row"><span class="label">语言</span><select class="grow"><option>auto</option></select></div>
+        </div>
+      </div>
+
+      <div class="dock" data-state="idle" data-expanded="false">
+        <div class="composer"><span class="fake">给 DSH 发消息…</span><span>◧</span><span>➤</span></div>
+        <div class="anchor"><div class="orbwrap">
+          <button class="orb" title="语音"><svg class="ic"><use href="#i-mic"/></svg></button>
+        </div>
+        <div class="spread">
+          <div class="cell-txt"><span class="cell c-mic"><svg class="ic sm"><use href="#i-mic"/></svg></span><small>麦克风</small></div>
+          <div class="cell-txt"><span class="cell c-speak"><svg class="ic sm"><use href="#i-speaker"/></svg></span><small>朗读</small></div>
+          <div class="cell-txt"><span class="cell c-inter"><svg class="ic sm"><use href="#i-bolt"/></svg></span><small>插话</small></div>
+          <div class="cell-txt"><span class="cell c-set"><svg class="ic sm"><use href="#i-gear"/></svg></span><small>设置</small></div>
+        </div>
+        </div>
+      </div>
+    </div>
+    <div class="readout" data-readout></div>
+  </section>
+
+  <!-- ═══════════════════ C：透明胶球 ═══════════════════ -->
+  <section class="col th-c" data-theme="C">
+    <h2>C · 透明胶球</h2>
+    <p class="sub">球是<b>无色透明的大水珠</b>：只靠高光、内阴影和底部焦散定义形状，不带任何蓝色。朗读时球体轻微起伏，展开时整颗碎成四颗透明小胶球。</p>
+    <div class="stage">
+      <div class="bubble user">把设置面板的字看清楚点</div>
+      <div class="bubble bot">水珠是透明的，你能透过它看到底下的字。</div>
+      <div class="spacer"></div>
+
+      <div class="panel" data-fill="rgba(255,255,255,0.58)" data-stage="#eef1f6">
+        <div class="phead"><strong>DSH-Voice</strong><button>关闭</button></div>
+        <div class="row"><span class="label">识别</span><span class="kv">sensevoice-small · int8</span></div>
+        <div class="row"><span class="label">断句 VAD</span><span class="kv">firered</span></div>
+        <div class="row"><span class="label">TTS 服务</span><span class="kv">mimo</span></div>
+        <div class="row ok">● 语音引擎就绪</div>
+        <div class="sect">
+          <div class="row"><span class="label">音色</span>
+            <select class="grow"><option>mimo_default</option><option>011_关于我们的故事（克隆）</option></select></div>
+          <div class="row"><span class="kv grow">011_关于我们的故事 · 65 KB</span><button>删除</button></div>
+        </div>
+        <div class="sect">
+          <div class="row"><strong>新建克隆音色</strong></div>
+          <div class="row"><input placeholder="音色名"></div>
+          <div class="row"><input type="file"></div>
+          <div class="row"><span class="note">选择参考音频（wav/mp3，5~20 秒最稳）</span></div>
+          <div class="row"><button class="primary">创建</button></div>
+        </div>
+        <div class="sect">
+          <div class="row"><strong>MiMo API Key（留空则读 MIMO_API_KEY 环境变量）</strong></div>
+          <div class="row"><input class="grow" placeholder="sk-…"><button>保存</button></div>
+          <div class="row"><span class="label">语言</span><select class="grow"><option>auto</option></select></div>
+        </div>
+      </div>
+
+      <div class="dock" data-state="idle" data-expanded="false">
+        <div class="composer"><span class="fake">给 DSH 发消息…</span><span>◧</span><span>➤</span></div>
+        <div class="anchor"><div class="orbwrap">
+          <span class="orbwave"></span>
+          <span class="gelwrap"><button class="orb" title="语音"><svg class="ic"><use href="#i-mic"/></svg></button></span>
+          <div class="spread">
+            <div class="node n-mic"   style="--tx:-142px;--ty:-8px"><span class="cap">麦克风</span><span class="gbtn"><svg class="ic sm"><use href="#i-mic"/></svg></span></div>
+            <div class="node n-speak" style="--tx:-96px;--ty:-48px"><span class="cap">朗读</span><span class="gbtn"><svg class="ic sm"><use href="#i-speaker"/></svg></span></div>
+            <div class="node n-inter" style="--tx:-46px;--ty:-70px"><span class="cap">插话</span><span class="gbtn"><svg class="ic sm"><use href="#i-bolt"/></svg></span></div>
+            <div class="node n-set"   style="--tx:6px;--ty:-74px"><span class="cap">设置</span><span class="gbtn"><svg class="ic sm"><use href="#i-gear"/></svg></span></div>
+          </div>
+        </div></div>
+      </div>
+    </div>
+    <div class="readout" data-readout></div>
+  </section>
+
+</main>
+
+<script>
+(function () {
+  var body = document.body;
+
+  function press(container, value) {
+    container.querySelectorAll('button').forEach(function (button) {
+      button.setAttribute('aria-pressed', String(button.dataset.v === value));
+    });
+  }
+
+  var mode = document.getElementById('mode');
+  mode.addEventListener('click', function (event) {
+    var button = event.target.closest('button');
+    if (!button) return;
+    if (button.dataset.v === 'dark') body.setAttribute('data-ds-dark-theme', '');
+    else body.removeAttribute('data-ds-dark-theme');
+    press(mode, button.dataset.v);
+    render();
+  });
+
+  var state = document.getElementById('state');
+  state.addEventListener('click', function (event) {
+    var button = event.target.closest('button');
+    if (!button) return;
+    press(state, button.dataset.v);
+    document.querySelectorAll('.dock').forEach(function (dock) { dock.dataset.state = button.dataset.v; });
+  });
+
+  var expand = document.getElementById('expand');
+  function setExpanded(value) {
+    press(expand, String(value));
+    document.querySelectorAll('.dock').forEach(function (dock) { dock.dataset.expanded = String(value); });
+  }
+  expand.addEventListener('click', function (event) {
+    var button = event.target.closest('button');
+    if (button) setExpanded(button.dataset.v === 'true');
+  });
+  document.querySelectorAll('.orb').forEach(function (orb) {
+    orb.addEventListener('click', function () {
+      var dock = orb.closest('.dock');
+      setExpanded(dock.dataset.expanded !== 'true');
+    });
+  });
+
+  // ── 对比度自算：面板底色按 alpha 合成到舞台底色上，再与文字色比 ──
+  function normalize(color) {
+    var probe = document.createElement('span');
+    probe.style.color = color;
+    document.body.appendChild(probe);
+    var value = getComputedStyle(probe).color;
+    probe.remove();
+    var parts = value.match(/[0-9.]+/g).map(Number);
+    return { r: parts[0], g: parts[1], b: parts[2], a: parts[3] === undefined ? 1 : parts[3] };
+  }
+  function over(top, bottom) {
+    return {
+      r: top.r * top.a + bottom.r * (1 - top.a),
+      g: top.g * top.a + bottom.g * (1 - top.a),
+      b: top.b * top.a + bottom.b * (1 - top.a), a: 1,
+    };
+  }
+  function luminance(c) {
+    function channel(v) { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }
+    return 0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b);
+  }
+  function ratio(a, b) {
+    var x = luminance(a), y = luminance(b);
+    return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+  }
+
+  function render() {
+    var dark = body.hasAttribute('data-ds-dark-theme');
+    document.querySelectorAll('.col').forEach(function (col) {
+      var panel = col.querySelector('.panel');
+      var out = col.querySelector('[data-readout]');
+      var fill = dark ? 'rgba(255,255,255,0.14)' : panel.dataset.fill;
+      var stageColor = dark ? '#191b20' : panel.dataset.stage;
+      var base = over(normalize(fill), normalize(stageColor));
+      var rows = [
+        ['正文 / 主文字', getComputedStyle(panel).getPropertyValue('--dsw-alias-label-primary').trim()],
+        ['次要 / 标签', getComputedStyle(panel).getPropertyValue('--dsw-alias-label-secondary').trim()],
+      ];
+      var lines = rows.map(function (row) {
+        var value = ratio(normalize(row[1]), base);
+        return '<div>' + row[0] + ' — <b>' + value.toFixed(2) + ':1</b> ' +
+          '<span class="' + (value >= 4.5 ? 'pass' : 'fail') + '">' +
+          (value >= 4.5 ? '达标' : '不足') + '</span>（阈值 4.5:1）</div>';
+      });
+      out.innerHTML = '<div>面板底色（合成后）rgb(' +
+        [base.r, base.g, base.b].map(function (v) { return Math.round(v); }).join(', ') +
+        ')　底色 ' + (dark ? '暗' : '亮') + '</div>' + lines.join('');
+    });
+  }
+
+  // 便于无头截图：?mode=dark&state=speaking&expand=true&only=C
+  var query = new URLSearchParams(location.search);
+  if (query.get('mode') === 'dark') { body.setAttribute('data-ds-dark-theme', ''); press(mode, 'dark'); }
+  if (query.has('state')) {
+    press(state, query.get('state'));
+    document.querySelectorAll('.dock').forEach(function (dock) { dock.dataset.state = query.get('state'); });
+  }
+  if (query.has('expand')) setExpanded(query.get('expand') === 'true');
+  var only = query.get('only');
+  if (only) {
+    document.querySelectorAll('.col').forEach(function (col) {
+      if (col.dataset.theme !== only) col.style.display = 'none';
+    });
+    document.querySelector('.hint').textContent = '方案 ' + only + '（单独样张）';
+  }
+
+  // ── C 的水球：朗读时用真实音量驱动不规则起伏 ───────────────────
+  // 真实实现里 --lvl 来自 Speaker 的 AnalyserNode（低频能量 = 音量）；
+  // 轮廓用四组互质频率的正弦叠加算出来，所以看不出循环，像浪一样此起彼伏。
+  // 聆听时可以直接复用插话检测已经在算的 RMS，不需要额外分析器。
+  var lvl = document.getElementById('lvl');
+  var autoBox = document.getElementById('auto');
+  var root = document.documentElement;
+  var cOrb = document.querySelector('.th-c .orb');
+  var WAVE = [
+    { f: 0.27, phase: 0.0, vertical: false },
+    { f: 0.41, phase: 1.9, vertical: true },
+    { f: 0.63, phase: 3.7, vertical: false },
+    { f: 0.19, phase: 5.1, vertical: true }
+  ];
+  function waveRadius(t, amp) {
+    var h = [], v = [];
+    for (var i = 0; i < 4; i++) {
+      var w = WAVE[i];
+      var s = Math.sin(2 * Math.PI * w.f * t + w.phase);
+      var big = amp * 8.5 * s;
+      var small = amp * 2.5 * s;
+      h.push((50 + (w.vertical ? small : big)).toFixed(2) + '%');
+      v.push((50 + (w.vertical ? big : small)).toFixed(2) + '%');
+    }
+    return h.join(' ') + ' / ' + v.join(' ');
+  }
+  function applyLevel(value) { root.style.setProperty('--lvl', String(value)); }
+  lvl.addEventListener('input', function () { autoBox.checked = false; applyLevel(lvl.value / 100); });
+
+  var started = performance.now();
+  var wasSpeaking = false;
+  function envelope(now) {
+    requestAnimationFrame(envelope);
+    var dock = document.querySelector('.th-c .dock');
+    var speaking = dock !== null && dock.dataset.state === 'speaking';
+    if (!speaking) {
+      if (wasSpeaking) { cOrb.style.borderRadius = ''; applyLevel(0); lvl.value = '0'; }
+      wasSpeaking = false;
+      return;
+    }
+    wasSpeaking = true;
+    var t = (now - started) / 1000;
+    var value;
+    if (autoBox.checked) {
+      // 音节包络：说话是一顿一顿的，浪就跟着一顿一顿地变大
+      var syllable = Math.pow(Math.max(0, Math.sin(t * Math.PI * 2 * 3.1)), 1.3);
+      value = Math.min(1, syllable * (0.75 + 0.25 * Math.sin(t * 4.7)));
+      lvl.value = String(Math.round(value * 100));
+    } else {
+      value = lvl.value / 100;
+    }
+    applyLevel(value);
+    cOrb.style.borderRadius = waveRadius(t, value);
+  }
+  requestAnimationFrame(envelope);
+
+  if (query.has('lvl')) { autoBox.checked = false; lvl.value = String(Number(query.get('lvl')) * 100); }
+  applyLevel(lvl.value / 100);
+
+  render();
+})();
+</script>
+</body>
+</html>

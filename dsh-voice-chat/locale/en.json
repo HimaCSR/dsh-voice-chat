@@ -1,0 +1,4 @@
+{
+  "title": "DSH-Voice",
+  "description": "Local SenseVoice-Small recognition + FireRedVAD endpointing + cloud TTS (Xiaomi MiMo by default, voice cloning), with barge-in."
+}
