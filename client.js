@@ -745,20 +745,13 @@ registerProcessor('voice-chat-mic', MicCapture);
       },
       knob: { padding: '0 9px', height: 26, fontSize: 12 },
       iconKnob: { padding: 0, width: 28, height: 28, justifyContent: 'center' },
-      chip: {
-        display: 'block',
-        width: '100%',
-        textAlign: 'left',
-        margin: '5px 0 0',
-        padding: '7px 9px',
-        fontSize: 11.5,
-      },
       // The panel is placed by `fitPanel()` next to wherever the bead happens to
-      // sit, so only the material and the shape are declared here.
+      // sit, so only the material and the shape are declared here. Its width and
+      // its height limit come from `panelLimits()`, which bounds both to the
+      // movable area — a value here would silently win over that.
       panel: {
         position: 'fixed',
         zIndex: 60,
-        maxHeight: '72vh',
         overflowY: 'auto',
         padding: 14,
         borderRadius: 22,
@@ -788,7 +781,6 @@ registerProcessor('voice-chat-mic', MicCapture);
       section: { marginTop: 10, paddingTop: 9, borderTop: '1px solid var(--dshv-sep)' },
       error: { color: 'var(--dshv-record)', marginTop: 6, whiteSpace: 'pre-wrap', wordBreak: 'break-word' },
       note: { color: 'var(--dsw-alias-label-tertiary, inherit)', fontSize: 11 },
-      head: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 },
       // A dot plus a word is enough for readiness; the reason lives in the
       // details drawer so the first screen stays readable.
       statusRow: { display: 'flex', alignItems: 'center', gap: 7, marginBottom: 8, fontSize: 12.5 },
@@ -836,8 +828,11 @@ registerProcessor('voice-chat-mic', MicCapture);
   --dshv-ink:var(--dsw-alias-label-primary,currentColor);
   position:fixed;z-index:70;display:inline-flex;align-items:center;
   transition:left .26s cubic-bezier(.2,.9,.25,1),top .26s cubic-bezier(.2,.9,.25,1)}
-/* No transition while the pointer owns the position, or the bead would lag. */
-.dshv[data-dragging="true"]{transition:none}
+/* No transition while the pointer owns the position, or the bead would lag. The
+   same goes while the area around it is being dragged: the bead has to keep up
+   with the edge it clings to, and a quarter-second ease reads as lag. */
+.dshv[data-dragging="true"],
+.dshv[data-following="true"]{transition:none}
 body[data-ds-dark-theme] .dshv{--dshv-glass:rgba(255,255,255,.14);
   --dshv-glass-strong:rgba(255,255,255,.90);--dshv-glass-stroke:rgba(255,255,255,.18);
   --dshv-glass-inner:rgba(255,255,255,.22);--dshv-glass-shadow:0 12px 36px rgba(0,0,0,.44);
@@ -874,11 +869,13 @@ body[data-ds-dark-theme] .dshv-panel button:hover:not(:disabled){background:rgba
 .dshv[data-attached="bottom"] .dshv-gel{
   --dshv-sx:1.07;--dshv-sy:1;--dshv-sag:0px;--dshv-tilt:0deg;transform-origin:center bottom}
 /* The droplet silhouette comes from JS whenever the bead is stuck (the wave owns
-   border-radius), so only the tremble stays in CSS. */
+   border-radius), so CSS must not animate that property here — and a stuck bead
+   with nothing to say stays perfectly still instead of trembling. The state
+   rules further down still shake it, because they only touch the transform. */
 .dshv[data-attached="left"] .dshv-orb,
 .dshv[data-attached="right"] .dshv-orb,
 .dshv[data-attached="top"] .dshv-orb,
-.dshv[data-attached="bottom"] .dshv-orb{animation:dshv-tremble .34s linear infinite}
+.dshv[data-attached="bottom"] .dshv-orb{animation:none}
 /* Only settle the sag when nothing is driving the level, or the meter lags. */
 .dshv[data-state="idle"] .dshv-gel,
 .dshv[data-state="notready"] .dshv-gel{transition:transform .3s cubic-bezier(.2,.9,.25,1)}
@@ -932,6 +929,12 @@ body[data-ds-dark-theme] .dshv-panel button:hover:not(:disabled){background:rgba
 /* Speaking: the outline comes from the analyser each frame, so only the
    tremble stays in CSS (and it animates transform, never border-radius). */
 .dshv[data-state="speaking"] .dshv-orb{animation:dshv-tremble .3s linear infinite}
+/* Stuck to an edge the silhouette is written per frame in JS, so the swell has to
+   stand down there as well — the state motions still get to shake it. */
+.dshv[data-attached="left"][data-state="recognizing"] .dshv-orb,
+.dshv[data-attached="right"][data-state="recognizing"] .dshv-orb,
+.dshv[data-attached="top"][data-state="recognizing"] .dshv-orb,
+.dshv[data-attached="bottom"][data-state="recognizing"] .dshv-orb{animation:dshv-tremble .15s linear infinite}
 
 .dshv-wave{position:absolute;inset:0;border-radius:50%;border:2px solid var(--dshv-ripple);
   opacity:0;pointer-events:none}
@@ -953,22 +956,44 @@ body[data-ds-dark-theme] .dshv-panel button:hover:not(:disabled){background:rgba
 .dshv[data-state="speaking"] .dshv-wave::before{animation-delay:.63s}
 .dshv[data-state="speaking"] .dshv-wave::after{animation-delay:1.27s}
 
-/* Open: the big bead breaks into four smaller ones. */
+/* Open: the four droplets glide out of the orb to their places along the nearest
+   edge, on a spring. Closing is the same movement backwards — they gather along
+   that edge into one another and melt there, while the orb reappears exactly
+   where they gathered. */
 .dshv-spread{position:absolute;right:0;bottom:0;width:0;height:0}
-.dshv-node{position:absolute;right:26px;bottom:26px;display:flex;flex-direction:column;
-  align-items:center;gap:5px;transform:translate(0,0) scale(.4);opacity:0;pointer-events:none;
+/* The node is exactly its bead — the label floats outside it — so a bead that
+   docks flush really does touch the edge it docked to. */
+.dshv-node{position:absolute;right:26px;bottom:26px;width:44px;height:44px;
+  transform:translate(var(--mx),var(--my)) scale(.4);opacity:0;pointer-events:none;
   transition:transform .42s cubic-bezier(.26,1.5,.5,1),opacity .26s ease}
 .dshv[data-expanded="true"] .dshv-node{transform:translate(var(--tx),var(--ty)) scale(1);
   opacity:1;pointer-events:auto}
-.dshv[data-expanded="true"] .dshv-node:nth-child(2){transition-delay:.03s}
-.dshv[data-expanded="true"] .dshv-node:nth-child(3){transition-delay:.09s}
-.dshv[data-expanded="true"] .dshv-node:nth-child(4){transition-delay:.15s}
+.dshv[data-expanded="true"] .dshv-node:nth-child(2){transition-delay:.03s;--dshv-dock-delay:.03s}
+.dshv[data-expanded="true"] .dshv-node:nth-child(3){transition-delay:.09s;--dshv-dock-delay:.09s}
+.dshv[data-expanded="true"] .dshv-node:nth-child(4){transition-delay:.15s;--dshv-dock-delay:.15s}
 .dshv[data-expanded="true"] .dshv-orb{transform:scale(.38);opacity:0;animation:none}
 .dshv[data-expanded="true"] .dshv-wave{display:none}
-.dshv-cap{font-size:11px;white-space:nowrap;color:var(--dsw-alias-label-secondary,currentColor)}
+/* The label always sits above the bead: below it, the transcript's own text runs
+   straight through it. */
+.dshv-cap{position:absolute;left:50%;bottom:100%;transform:translateX(-50%);
+  margin-bottom:2px;font-size:11px;line-height:1.15;white-space:nowrap;
+  color:var(--dsw-alias-label-secondary,currentColor)}
+/* The droplet arrives bare — no label, no glyph — and only gets them once it has
+   docked. Closing drops them at once, so nothing text-like travels back. */
+.dshv-bead>svg,.dshv-cap{opacity:0;transition:opacity .14s ease}
+.dshv[data-expanded="true"] .dshv-node .dshv-bead>svg,
+.dshv[data-expanded="true"] .dshv-node .dshv-cap{
+  opacity:1;transition:opacity .2s ease calc(.46s + var(--dshv-dock-delay,0s))}
 .dshv-bead{position:relative;width:44px;height:44px;padding:0;border:0;border-radius:50%;
   background:transparent;color:var(--dshv-ink);cursor:pointer;display:grid;
-  place-items:center;font:inherit}
+  place-items:center;font:inherit;transition:border-radius .3s ease}
+/* Every docked droplet hangs off its edge the way the orb does: flattened against
+   the surface it touches, round away from it. */
+.dshv-node[data-docked="left"]{--dshv-dock-radius:20% 80% 80% 20% / 50% 50% 50% 50%}
+.dshv-node[data-docked="right"]{--dshv-dock-radius:80% 20% 20% 80% / 50% 50% 50% 50%}
+.dshv-node[data-docked="top"]{--dshv-dock-radius:50% 50% 50% 50% / 20% 20% 80% 80%}
+.dshv-node[data-docked="bottom"]{--dshv-dock-radius:50% 50% 50% 50% / 80% 80% 20% 20%}
+.dshv-node .dshv-bead{border-radius:var(--dshv-dock-radius,50%)}
 .dshv-node[data-on="true"] .dshv-bead::before{background:var(--dshv-glass-strong);
   box-shadow:inset 0 1px 1px rgba(255,255,255,.95),0 8px 22px var(--dshv-bead-shade)}
 .dshv-node[data-on="true"] .dshv-bead{color:var(--dshv-accent)}
@@ -987,13 +1012,42 @@ body[data-ds-dark-theme] .dshv-panel button:hover:not(:disabled){background:rgba
   color:var(--dsw-alias-label-secondary,inherit)}
 .dshv-panel .dshv-kv>span:last-child{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;
   white-space:nowrap}
-.dshv-panel .dshv-voicerow{display:flex;align-items:center;gap:6px;margin:5px 0}
-.dshv-panel audio{height:26px;max-width:132px}
+/* A cloned voice reads better as a card: its name needs the full width, and the
+   player used to squeeze it into a sliver beside the delete button. */
+.dshv-voicecard{margin:6px 0;padding:7px 8px;border-radius:12px;
+  border:1px solid var(--dshv-sep);background:var(--dshv-field)}
+.dshv-voicehead{display:flex;align-items:center;gap:6px}
+.dshv-panel audio{width:100%;height:26px}
 .dshv-panel button{cursor:pointer}
 .dshv-panel button:disabled{opacity:.5;cursor:default}
 .dshv-panel select,.dshv-panel input,.dshv-panel textarea{min-width:0}
 .dshv-panel ::placeholder{color:var(--dsw-alias-label-tertiary,currentColor);opacity:.8}
-.dshv-panel[data-wide="true"]{width:min(420px,calc(100vw - 24px));max-height:82vh}
+/* The sheet scrolls inside itself, so its head has to stay put: it carries the
+   readiness dot and the only way out. It re-declares the glass because the
+   content would otherwise show through as it scrolls underneath. */
+.dshv-panelhead{position:sticky;z-index:1;top:-14px;display:flex;align-items:center;gap:8px;
+  margin:-14px -14px 10px;padding:14px 14px 8px;border-radius:22px 22px 0 0;
+  background:var(--dshv-glass);backdrop-filter:blur(30px) saturate(180%);
+  -webkit-backdrop-filter:blur(30px) saturate(180%);box-shadow:0 1px 0 var(--dshv-sep)}
+/* The one action that unblocks everything else gets to look like it. */
+.dshv-panel .dshv-primary{width:100%;height:32px;justify-content:center;border-radius:12px;
+  background:var(--dshv-accent);color:#fff;font-weight:600}
+.dshv-panel .dshv-primary:hover:not(:disabled){background:var(--dshv-accent);filter:brightness(1.07)}
+/* The error the bead is wearing, in words: beside the bead, capped in width and
+   dismissible — a single failed request must not haunt the corner forever. */
+.dshv-alert{position:absolute;top:50%;transform:translateY(-50%);display:inline-flex;
+  align-items:center;gap:6px;width:max-content;padding:6px 8px;border-radius:12px;
+  border:1px solid rgba(255,59,48,.35);
+  background:rgba(255,59,48,.10);color:var(--dshv-record);cursor:pointer;
+  font:inherit;font-size:11.5px;line-height:1.45;text-align:left}
+body[data-ds-dark-theme] .dshv-alert{border-color:rgba(255,69,58,.42);
+  background:rgba(255,69,58,.16)}
+.dshv-alert-text{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;
+  min-width:0;overflow:hidden;overflow-wrap:anywhere}
+.dshv-alert-close{flex:none;display:inline-flex;align-items:center;justify-content:center;
+  width:18px;height:18px;padding:0;border:0;border-radius:50%;background:none;
+  color:inherit;cursor:pointer;opacity:.75}
+.dshv-alert-close:hover{opacity:1;background:rgba(255,59,48,.18)}
 .dshv-backdrop{position:fixed;inset:0;z-index:59;background:rgba(20,22,26,.28)}
 body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
 
@@ -1015,7 +1069,10 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
 
 @media (prefers-reduced-motion:reduce){
   .dshv-orb,.dshv-wave,.dshv-wave::before,.dshv-wave::after{animation:none!important}
-  .dshv-node,.dshv-orb{transition-duration:.01ms!important}
+  .dshv-node{animation:none!important;transition-duration:.01ms!important}
+  .dshv[data-expanded="true"] .dshv-node{transform:translate(var(--tx),var(--ty)) scale(1)}
+  .dshv-bead>svg,.dshv-cap{opacity:1!important;transition:none!important}
+  .dshv-orb{transition-duration:.01ms!important}
   .dshv-bar[data-busy="true"]>i{animation:none!important}}
 `;
 
@@ -1283,7 +1340,9 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
 
       async function recognize(pcm) {
         engine.recorder?.setPaused(true);
-        setEngine({ recognizing: true });
+        // A fresh attempt supersedes the previous failure; otherwise the old
+        // message would sit beside the bead until the page was reloaded.
+        setEngine({ recognizing: true, error: null });
         try {
           const language = readString(STORAGE.language, '') || engine.config?.language || 'auto';
           const result = await api.stt(normalizeUtterance(pcm), language);
@@ -1367,9 +1426,13 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
     const ORB_SIZE = 52; // matches .dshv-orbwrap
     const ORB_MARGIN = 6; // gap kept from a bound
     const DRAG_SLOP = 5; // below this a gesture is a tap, not a drag
-    const NODE_WIDTH = 48; // a bead plus its label box
-    const NODE_HEIGHT = 68;
-    const BEAD_GAP = 4; // minimum clearance between two beads
+    // A docked node is exactly its bead — the label floats outside it — so the
+    // geometry computed here is the geometry on screen, and a bead that lands
+    // flush against an edge really does touch it.
+    const BEAD_SIZE = 44; // matches .dshv-node / .dshv-bead
+    // Clearance between two docked beads, wide enough for the label floating
+    // between them — the label is out of flow, so it is not part of the math.
+    const BEAD_GAP = 18;
 
     /** The whole window, as a rect; never NaN, even outside a browser. */
     function viewportBounds() {
@@ -1383,25 +1446,69 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
       };
     }
 
+    /** The element's viewport rect, in the shape the placement helpers expect. */
+    function rectOf(element) {
+      const rect = element.getBoundingClientRect();
+      return { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
+    }
+
+    /**
+     * The composer that encloses the bead. The bead must stay above it: docking
+     * on the true bottom edge of the transcript parks it on the token readout
+     * printed just above the input card. The editor is a Lexical contenteditable
+     * div, not a textarea, so all three shapes are accepted. Null when nothing
+     * encloses the bead.
+     */
+    function composerElement(element) {
+      let node = element.parentElement;
+      while (node !== null && node !== document.body && node !== document.documentElement) {
+        const input = typeof node.querySelector === 'function'
+          ? node.querySelector('textarea, [contenteditable="true"], [role="textbox"]')
+          : null;
+        if (input !== null) return node;
+        node = node.parentElement;
+      }
+      return null;
+    }
+
+    /** The movable rect, with its bottom pulled up above that composer. */
+    function boundsFor(element, ceilingElement) {
+      const rect = rectOf(element);
+      if (ceilingElement === null || ceilingElement === undefined) return rect;
+      const ceiling = rectOf(ceilingElement).y;
+      if (!Number.isFinite(ceiling) || ceiling <= rect.y) return rect;
+      return {
+        ...rect,
+        height: Math.max(160, Math.min(rect.height, ceiling - rect.y - ORB_MARGIN)),
+      };
+    }
+
     /**
      * The area the bead is allowed to live in: the innermost scrolling or
      * clipping ancestor — in practice the conversation panel — so the bead can
      * never drift over the sidebar or be clipped by the transcript viewport.
      * Falls back to the whole window when nothing suitable encloses the seat.
+     * The element comes back too: it is what tells us the area changed shape.
      */
-    function resolveBounds(element) {
-      const fallback = viewportBounds();
+    function resolveBoundsTarget(element) {
+      const fallback = { rect: viewportBounds(), element: null, ceilingElement: null };
       if (typeof window === 'undefined' || element === null || element === undefined) return fallback;
       let node = element.parentElement;
       while (node !== null && node !== document.body && node !== document.documentElement) {
         const style = window.getComputedStyle(node);
         const rect = node.getBoundingClientRect();
         if (/(auto|scroll|hidden)/.test(style.overflowY) && rect.width >= 240 && rect.height >= 240) {
-          return { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
+          const ceilingElement = composerElement(element);
+          return { rect: boundsFor(node, ceilingElement), element: node, ceilingElement };
         }
         node = node.parentElement;
       }
       return fallback;
+    }
+
+    /** Just the rect, for the callers that only place the bead. */
+    function resolveBounds(element) {
+      return resolveBoundsTarget(element).rect;
     }
 
     function clampPosition(point, bounds = viewportBounds()) {
@@ -1443,16 +1550,44 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
       }
     }
 
+    /**
+     * Positions are stored as fractions of the bounds, so a shape change that
+     * leaves them alone must not rewrite them: a dragged divider reflows on
+     * every frame.
+     */
+    let lastPersistedPosition = '';
+
     function persistPosition(point, bounds, edge = null) {
-      writeString(STORAGE.pos, JSON.stringify({
+      const payload = JSON.stringify({
         fx: (point.x - bounds.x) / bounds.width,
         fy: (point.y - bounds.y) / bounds.height,
         edge,
-      }));
+      });
+      if (payload === lastPersistedPosition) return;
+      lastPersistedPosition = payload;
+      writeString(STORAGE.pos, payload);
     }
 
     function clampAlong(value, min, max) {
       return Math.min(Math.max(value, min), Math.max(min, max));
+    }
+
+    /** The flush coordinates of a bead wetted to one of the four edges. */
+    function attachTo(edge, point, bounds = viewportBounds()) {
+      const minX = bounds.x + ORB_MARGIN;
+      const maxX = bounds.x + bounds.width - ORB_SIZE - ORB_MARGIN;
+      const minY = bounds.y + ORB_MARGIN;
+      const maxY = bounds.y + bounds.height - ORB_SIZE - ORB_MARGIN;
+      if (edge === 'left') return { x: bounds.x, y: clampAlong(point.y, minY, maxY), edge: 'left' };
+      if (edge === 'right') {
+        return { x: bounds.x + bounds.width - ORB_SIZE, y: clampAlong(point.y, minY, maxY), edge: 'right' };
+      }
+      if (edge === 'top') return { x: clampAlong(point.x, minX, maxX), y: bounds.y, edge: 'top' };
+      return {
+        x: clampAlong(point.x, minX, maxX),
+        y: bounds.y + bounds.height - ORB_SIZE,
+        edge: 'bottom',
+      };
     }
 
     /**
@@ -1476,106 +1611,106 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
       const nearest = Object.keys(distances)
         .reduce((best, edge) => (distances[edge] < distances[best] ? edge : best), 'left');
       if (distances[nearest] > reach) return null;
-      if (nearest === 'left') return { x: bounds.x, y: clampAlong(point.y, minY, maxY), edge: 'left' };
-      if (nearest === 'right') {
-        return { x: bounds.x + bounds.width - ORB_SIZE, y: clampAlong(point.y, minY, maxY), edge: 'right' };
-      }
-      if (nearest === 'top') return { x: clampAlong(point.x, minX, maxX), y: bounds.y, edge: 'top' };
-      return {
-        x: clampAlong(point.x, minX, maxX),
-        y: bounds.y + bounds.height - ORB_SIZE,
-        edge: 'bottom',
-      };
-    }
-
-    /** Stuck beads fan out in a line parallel to the edge they cling to. */
-    function edgeLayout(attached, count) {
-      const vertical = attached === 'left' || attached === 'right';
-      const step = (vertical ? NODE_HEIGHT : NODE_WIDTH) + 6;
-      const offsets = [];
-      for (let index = 0; index < count; index += 1) {
-        const along = (index - (count - 1) / 2) * step;
-        offsets.push(vertical ? { tx: 0, ty: along } : { tx: along, ty: 0 });
-      }
-      return offsets;
-    }
-
-    /** Mirrors the base fan away from the edge the bead hugs, and flips it near the top. */
-    function orientBeam(bead, position, bounds) {
-      const centreX = position.x + ORB_SIZE / 2;
-      const centreY = position.y + ORB_SIZE / 2;
-      const mirrorX = centreX < bounds.x + bounds.width / 2 ? -1 : 1;
-      const flipY = centreY < bounds.y + bounds.height * 0.42 ? -1 : 1;
-      return { tx: bead.tx * mirrorX, ty: bead.ty * flipY };
-    }
-
-    /** Reflects one bead back inside — a bounce, not a clamp. */
-    function reflectBeam(tx, ty, position, bounds) {
-      const centreX = position.x + ORB_SIZE / 2;
-      const centreY = position.y + ORB_SIZE / 2;
-      const inner = { left: bounds.x + ORB_MARGIN, top: bounds.y + ORB_MARGIN };
-      const outer = {
-        right: bounds.x + bounds.width - ORB_MARGIN,
-        bottom: bounds.y + bounds.height - ORB_MARGIN,
-      };
-      let nextX = tx;
-      let nextY = ty;
-      const left = centreX + tx - NODE_WIDTH;
-      const right = centreX + tx;
-      const top = centreY + ty - NODE_HEIGHT;
-      const bottom = centreY + ty;
-      if (left < inner.left) nextX += 2 * (inner.left - left);
-      if (right > outer.right) nextX -= 2 * (right - outer.right);
-      if (top < inner.top) nextY += 2 * (inner.top - top);
-      if (bottom > outer.bottom) nextY -= 2 * (bottom - outer.bottom);
-      return { tx: nextX, ty: nextY };
-    }
-
-    function fitBeam(bead, position, bounds = viewportBounds()) {
-      const oriented = orientBeam(bead, position, bounds);
-      return reflectBeam(oriented.tx, oriented.ty, position, bounds);
+      return attachTo(nearest, point, bounds);
     }
 
     /**
-     * Lays the fan out: fit every bead inside the bounds, then relax overlapping
-     * pairs apart. Without the second pass a bead bounced off an edge can land
-     * on top of its neighbour — the reflection moves beads toward each other.
+     * Re-derives the coordinates once the movable area changed shape: a bead
+     * wetted to an edge follows that edge, a free one is only kept inside. The
+     * user moved the area, never the bead.
      */
-    function layoutFan(beads, position, bounds = viewportBounds(), attached = null) {
-      // Stuck to an edge the beads line up alongside it; otherwise they arc away.
-      const offsets = attached === null
-        ? beads.map((bead) => fitBeam(bead, position, bounds))
-        : edgeLayout(attached, beads.length)
-          .map((offset) => reflectBeam(offset.tx, offset.ty, position, bounds));
-      for (let pass = 0; pass < 16; pass += 1) {
-        let moved = false;
-        for (let a = 0; a < offsets.length; a += 1) {
-          for (let b = a + 1; b < offsets.length; b += 1) {
-            const dx = offsets[b].tx - offsets[a].tx;
-            const dy = offsets[b].ty - offsets[a].ty;
-            const overlapX = NODE_WIDTH + BEAD_GAP - Math.abs(dx);
-            const overlapY = NODE_HEIGHT + BEAD_GAP - Math.abs(dy);
-            if (overlapX <= 0 || overlapY <= 0) continue;
-            moved = true;
-            // Push apart along whichever axis needs the least movement.
-            if (overlapX <= overlapY) {
-              const push = (overlapX / 2 + 0.5) * (dx < 0 ? -1 : 1);
-              offsets[a].tx -= push;
-              offsets[b].tx += push;
-            } else {
-              const push = (overlapY / 2 + 0.5) * (dy < 0 ? -1 : 1);
-              offsets[a].ty -= push;
-              offsets[b].ty += push;
-            }
-          }
-        }
-        if (!moved) break;
-        // Separation must not push anyone back outside.
-        for (let index = 0; index < offsets.length; index += 1) {
-          offsets[index] = reflectBeam(offsets[index].tx, offsets[index].ty, position, bounds);
-        }
+    function refit(current, bounds = viewportBounds()) {
+      const { edge } = current;
+      if (edge === 'left' || edge === 'right' || edge === 'top' || edge === 'bottom') {
+        return attachTo(edge, current, bounds);
+      }
+      return { ...clampPosition(current, bounds), edge: null };
+    }
+
+    /** The edge of the movable area the bead sits closest to. */
+    function nearestEdge(position, bounds = viewportBounds()) {
+      const centreX = position.x + ORB_SIZE / 2;
+      const centreY = position.y + ORB_SIZE / 2;
+      const distances = {
+        left: centreX - bounds.x,
+        right: bounds.x + bounds.width - centreX,
+        top: centreY - bounds.y,
+        bottom: bounds.y + bounds.height - centreY,
+      };
+      return Object.keys(distances)
+        .reduce((best, edge) => (distances[edge] < distances[best] ? edge : best), 'left');
+    }
+
+    /**
+     * The beads break off the orb and dock against the nearest edge, in a line
+     * parallel to it and centred on where the orb was. Nothing pushes anything
+     * out of the way: the spacing alone keeps them apart, and the line is only
+     * tightened and slid as a whole when the edge is too short to hold it.
+     *
+     * Each entry carries where the bead rests (`tx`/`ty`, flush against the edge,
+     * no margin at all), the edge it docked to, and the point the droplets gather
+     * into when they merge (`mx`/`my`).
+     */
+    function dockLayout(position, bounds = viewportBounds(), count = 4) {
+      const edge = nearestEdge(position, bounds);
+      const vertical = edge === 'left' || edge === 'right';
+      const centreX = position.x + ORB_SIZE / 2;
+      const centreY = position.y + ORB_SIZE / 2;
+      const room = vertical ? bounds.height : bounds.width;
+      const usable = Math.max(BEAD_SIZE, room);
+      const spacing = Math.min(
+        BEAD_SIZE + BEAD_GAP,
+        (usable - BEAD_SIZE) / Math.max(1, count - 1),
+      );
+      const offsets = [];
+      for (let index = 0; index < count; index += 1) {
+        const step = (index - (count - 1) / 2) * spacing;
+        offsets.push(vertical
+          ? { tx: 0, ty: step + BEAD_SIZE / 2, mx: 0, my: BEAD_SIZE / 2 }
+          : { tx: step + BEAD_SIZE / 2, ty: 0, mx: BEAD_SIZE / 2, my: 0 });
+      }
+      const flush = {
+        left: { x: bounds.x - centreX + BEAD_SIZE, y: 0 },
+        right: { x: bounds.x + bounds.width - centreX, y: 0 },
+        top: { x: 0, y: bounds.y - centreY + BEAD_SIZE },
+        bottom: { x: 0, y: bounds.y + bounds.height - centreY },
+      }[edge];
+      const spans = offsets.map((offset) => (vertical
+        ? [centreY + offset.ty - BEAD_SIZE, centreY + offset.ty]
+        : [centreX + offset.tx - BEAD_SIZE, centreX + offset.tx]));
+      const first = Math.min(...spans.map((span) => span[0]));
+      const last = Math.max(...spans.map((span) => span[1]));
+      const min = vertical ? bounds.y : bounds.x;
+      const max = vertical ? bounds.y + bounds.height : bounds.x + bounds.width;
+      let shift = 0;
+      if (first < min) shift = min - first;
+      else if (last > max) shift = max - last;
+      for (const offset of offsets) {
+        const slideX = flush.x + (vertical ? 0 : shift);
+        const slideY = flush.y + (vertical ? shift : 0);
+        offset.tx += slideX;
+        offset.ty += slideY;
+        offset.mx += slideX;
+        offset.my += slideY;
+        offset.edge = edge;
       }
       return offsets;
+    }
+
+    /**
+     * Where the docked line sits, as a point — the shared middle of the beads. The
+     * orb comes back there once they merge, so it reappears exactly where they
+     * gathered instead of at the spot it was opened from.
+     */
+    function dockCentre(position, bounds = viewportBounds(), offsets = dockLayout(position, bounds, 4)) {
+      const centreX = position.x + ORB_SIZE / 2;
+      const centreY = position.y + ORB_SIZE / 2;
+      const xs = offsets.map((offset) => centreX + offset.tx - BEAD_SIZE / 2);
+      const ys = offsets.map((offset) => centreY + offset.ty - BEAD_SIZE / 2);
+      return {
+        x: (Math.min(...xs) + Math.max(...xs)) / 2,
+        y: (Math.min(...ys) + Math.max(...ys)) / 2,
+      };
     }
 
     // ───────────────────────────────────────────── status + panel placement
@@ -1665,6 +1800,36 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
     }
 
     /**
+     * How large the settings sheet may be. It is bound to the movable area rather
+     * than to the window, so a bead parked near the bottom can no longer push the
+     * sheet off screen. The sheet and `fitPanel` both read their numbers here, so
+     * the height used for placement cannot drift away from the height rendered.
+     */
+    function panelLimits(bounds = viewportBounds(), wide = false, viewport = viewportBounds()) {
+      const gutter = 8;
+      const width = Math.min(wide ? 420 : 340, Math.max(240, bounds.width - gutter * 2));
+      const maxHeight = Math.min(
+        Math.round(viewport.height * 0.82),
+        Math.max(220, bounds.height - gutter * 2),
+      );
+      return { width, maxHeight };
+    }
+
+    /**
+     * Which side of the bead the error bubble goes on, and how wide it may get:
+     * a bead parked against the right edge must not push the message off screen.
+     */
+    function alertPlacement(position, bounds = viewportBounds()) {
+      const gap = 10;
+      const centre = position.x + ORB_SIZE / 2;
+      const side = centre <= bounds.x + bounds.width / 2 ? 'right' : 'left';
+      const room = side === 'right'
+        ? bounds.x + bounds.width - (position.x + ORB_SIZE)
+        : position.x - bounds.x;
+      return { side, maxWidth: Math.max(96, Math.min(280, room - gap)) };
+    }
+
+    /**
      * The clipboard payload for the diagnostics drawer. Assembled from what the
      * page already knows, so reporting a problem never needs a second request.
      */
@@ -1692,7 +1857,7 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
      * It can also be dragged anywhere and sticks to an edge when it hits one.
      */
     function VoiceBar(props) {
-      const { engine, speaker, subscribe, startListening, stopListening, refreshState, interruptReply, sessionId } = props;
+      const { engine, speaker, subscribe, startListening, stopListening, refreshState, interruptReply, setEngine, sessionId } = props;
       const t = props.t ?? ((key) => key);
       const [, force] = useState(0);
       const [panel, setPanel] = useState(false);
@@ -1704,6 +1869,12 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
       const rootRef = useRef(null);
       const orbRef = useRef(null);
       const dragRef = useRef(null);
+      const frameRef = useRef(0);
+      const settleRef = useRef(0);
+      const boundsRef = useRef(bounds);
+      const positionRef = useRef(position);
+      const boundsElementRef = useRef(null);
+      const ceilingElementRef = useRef(null);
       const speakEnabled = readFlag(STORAGE.enabled, true);
       const interruptMode = readFlag(STORAGE.interrupt, true);
 
@@ -1714,6 +1885,54 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
       useEffect(() => {
         void refreshState();
       }, [refreshState]);
+
+      // Everything that changes the movable area — a window resize, a dragged
+      // divider, a collapsing sidebar — funnels into one reflow per frame. The
+      // coordinates go straight to the DOM as it happens: a dragged divider must
+      // not wait for a React render or for the placement transition, which is
+      // exactly what made the bead lag behind the edge. The state catches up once
+      // the area stops changing.
+      const reflow = useCallback(() => {
+        if (dragRef.current !== null || frameRef.current !== 0) return;
+        frameRef.current = requestAnimationFrame(() => {
+          frameRef.current = 0;
+          const root = rootRef.current;
+          if (root === null) return;
+          const element = boundsElementRef.current;
+          const next = element === null
+            ? resolveBounds(root)
+            : boundsFor(element, ceilingElementRef.current);
+          const settled = refit(positionRef.current, next);
+          boundsRef.current = next;
+          positionRef.current = settled;
+          root.dataset.following = 'true';
+          root.style.left = `${settled.x}px`;
+          root.style.top = `${settled.y}px`;
+          if (settleRef.current !== 0) clearTimeout(settleRef.current);
+          settleRef.current = window.setTimeout(() => {
+            settleRef.current = 0;
+            const node = rootRef.current;
+            if (node !== null) delete node.dataset.following;
+            setBounds(boundsRef.current);
+            setPosition(positionRef.current);
+            persistPosition(positionRef.current, boundsRef.current, positionRef.current.edge);
+          }, 140);
+        });
+      }, []);
+
+      // Between reflows the state is the source of truth; the refs are what the
+      // per-frame path reads, so they have to follow it.
+      useEffect(() => {
+        positionRef.current = position;
+      }, [position]);
+      useEffect(() => {
+        boundsRef.current = bounds;
+      }, [bounds]);
+
+      useEffect(() => () => {
+        if (frameRef.current !== 0) cancelAnimationFrame(frameRef.current);
+        if (settleRef.current !== 0) clearTimeout(settleRef.current);
+      }, []);
 
       const listening = engine.listening === 'open' || engine.listening === 'speech';
       // `notready` outranks the rest: with the models missing, the amber bead is
@@ -1728,20 +1947,34 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
               ? 'speaking'
               : 'idle';
 
-      // The outline is drawn by JS in three cases: while speaking (spoken audio),
-      // while listening (the bead doubles as a level meter), and whenever it is
-      // stuck to an edge — the droplet silhouette lives in the radius, so the CSS
-      // swell must not own it. Everything else is left to CSS for free.
+      // The outline is drawn by JS in two situations: while audio drives it
+      // (spoken playback, or the level meter while listening) and whenever the
+      // bead is stuck to an edge — the droplet silhouette lives in the radius, so
+      // the CSS swell must not own it. A stuck idle bead gets one static shape.
       const attached = position.edge;
       useEffect(() => {
         const root = rootRef.current;
         const orb = orbRef.current;
         if (orb === null) return undefined;
-        const live = state === 'speaking' || state === 'listening' || attached !== null;
-        if (!live) {
+        // Two things can own the outline: the audio driving it, or an edge the
+        // bead has wetted (the droplet silhouette lives in the radius). A stuck
+        // bead with nothing to say gets one static shape and no per-frame work,
+        // so it hangs there quietly instead of trembling.
+        const driven = state === 'speaking' || state === 'listening';
+        const stuck = attached !== null;
+        if (!driven && !stuck) {
           orb.style.borderRadius = '';
           if (root !== null) root.style.setProperty('--dshv-lvl', '0');
           return undefined;
+        }
+        if (!driven) {
+          orb.style.borderRadius = waveRadius(0, 0, attached);
+          if (root !== null) root.style.setProperty('--dshv-lvl', '0');
+          return () => {
+            // Barge-in can arrive at any moment; leaving the deformed shape
+            // behind would freeze the bead mid-wobble.
+            orb.style.borderRadius = '';
+          };
         }
         const started = performance.now();
         let frame = 0;
@@ -1750,13 +1983,11 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
           let level;
           if (state === 'speaking') {
             level = speaker?.level?.() ?? 0;
-          } else if (state === 'listening') {
+          } else {
             // 0.045 RMS is a comfortable speaking level; the floor keeps the bead
             // breathing when the room goes quiet.
             const rms = engine.recorder?.level ?? 0;
             level = 0.18 + 0.82 * Math.min(1, rms / 0.045);
-          } else {
-            level = 0.12; // stuck and idle: a slow, shallow wetting wobble
           }
           if (root !== null) root.style.setProperty('--dshv-lvl', String(level));
           orb.style.borderRadius = waveRadius((now - started) / 1000, level, attached);
@@ -1772,14 +2003,25 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
       }, [state, speaker, engine, attached]);
 
       // The movable area comes from the DOM, so it is measured once mounted and
-      // again on every resize.
+      // then observed: dragging the divider beside the conversation changes it
+      // without ever resizing the window. The element is kept, so a reflow only
+      // needs one rect read instead of walking the ancestors again.
       useLayoutEffect(() => {
         const root = rootRef.current;
-        if (root === null) return;
-        const next = resolveBounds(root);
-        setBounds(next);
-        setPosition(readSavedPosition(next));
-      }, []);
+        if (root === null) return undefined;
+        const target = resolveBoundsTarget(root);
+        boundsElementRef.current = target.element;
+        ceilingElementRef.current = target.ceilingElement;
+        boundsRef.current = target.rect;
+        const saved = readSavedPosition(target.rect);
+        positionRef.current = saved;
+        setBounds(target.rect);
+        setPosition(saved);
+        if (target.element === null || typeof ResizeObserver === 'undefined') return undefined;
+        const observer = new ResizeObserver(() => reflow());
+        observer.observe(target.element);
+        return () => observer.disconnect();
+      }, [reflow]);
 
       // The bead is fixed-position, so its coordinates are written straight
       // through: a re-render mid-drag must not yank it back to the old spot.
@@ -1791,14 +2033,28 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
       }, [position]);
 
       useEffect(() => {
-        const onResize = () => {
-          const root = rootRef.current;
-          const next = root === null ? viewportBounds() : resolveBounds(root);
-          setBounds(next);
-          setPosition((current) => ({ ...clampPosition(current, next), edge: current.edge }));
-        };
-        window.addEventListener('resize', onResize);
-        return () => window.removeEventListener('resize', onResize);
+        window.addEventListener('resize', reflow);
+        return () => window.removeEventListener('resize', reflow);
+      }, [reflow]);
+
+      // Closing runs the beads back into each other, so the orb reappears in the
+      // middle of the line they docked into. The position comes back because a tap
+      // that closes the beads and then drags has to start from where the orb ended
+      // up, not from where it was before.
+      const closeBeads = useCallback(() => {
+        setOpen(false);
+        const current = positionRef.current;
+        const area = boundsRef.current;
+        const spread = dockLayout(current, area, 4);
+        const centre = dockCentre(current, area, spread);
+        const settled = attachTo(nearestEdge(current, area), {
+          x: centre.x - ORB_SIZE / 2,
+          y: centre.y - ORB_SIZE / 2,
+        }, area);
+        positionRef.current = settled;
+        setPosition(settled);
+        persistPosition(settled, area, settled.edge);
+        return settled;
       }, []);
 
       // Tapping anything that is not part of this plugin folds the beads back
@@ -1809,13 +2065,13 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
         const onOutsideDown = (event) => {
           const root = rootRef.current;
           if (root !== null && root.contains(event.target)) return;
-          if (open) setOpen(false);
+          if (open) closeBeads();
         };
         const onKeyDown = (event) => {
           if (event.key !== 'Escape' || panel) return;
           const target = event.target;
           if (target && typeof target.closest === 'function' && target.closest('.dshv-panel')) return;
-          setOpen(false);
+          closeBeads();
         };
         document.addEventListener('pointerdown', onOutsideDown, true);
         document.addEventListener('keydown', onKeyDown, true);
@@ -1823,22 +2079,23 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
           document.removeEventListener('pointerdown', onOutsideDown, true);
           document.removeEventListener('keydown', onKeyDown, true);
         };
-      }, [open, panel]);
+      }, [open, panel, closeBeads]);
 
       const onPointerDown = (event) => {
         if (event.button !== 0) return;
+        const from = open ? closeBeads() : positionRef.current;
         dragRef.current = {
           id: event.pointerId,
           startX: event.clientX,
           startY: event.clientY,
-          originX: position.x,
-          originY: position.y,
+          originX: from.x,
+          originY: from.y,
           wasOpen: open,
           moved: false,
         };
-        setOpen(false);
-        // Grabbing the bead pulls it off the edge, so the sag goes away at once.
-        setPosition((current) => ({ ...current, edge: null }));
+        // The edge is released when the bead is actually dragged away, never on
+        // a plain press: tapping the bead expands the beads, and that has to keep
+        // the stuck layout it was already showing.
         event.currentTarget.setPointerCapture(event.pointerId);
       };
 
@@ -1851,6 +2108,13 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
         if (!drag.moved) {
           drag.moved = true;
           setDragging(true);
+          // Now it is a drag, so the bead leaves the edge it had wetted. The
+          // position is written together with the cleared edge, otherwise the
+          // layout effect below would pull the bead back to where the drag began.
+          setPosition({
+            ...clampPosition({ x: drag.originX + dx, y: drag.originY + dy }, bounds),
+            edge: null,
+          });
         }
         const root = rootRef.current;
         if (root === null) return;
@@ -1952,9 +2216,18 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
         },
       ];
 
-      // Edge-aware fan, relaxed so beads never overlap; while the bead is stuck
-      // to an edge the beads line up parallel to that edge instead.
-      const spread = layoutFan(beads, position, bounds, position.edge);
+      // Opening breaks the orb into four beads, which dock against the nearest
+      // edge and line up parallel to it.
+      const spread = dockLayout(position, bounds, beads.length);
+
+      // Whatever the bead has to say in words goes beside it, and always on the
+      // side that has room: a bead stuck to the right edge would otherwise push
+      // the message off screen, which is exactly how an error came to look like
+      // it had exploded out of the bead.
+      const alert = alertPlacement(position, bounds);
+      const alertPlacementStyle = alert.side === 'right'
+        ? { left: ORB_SIZE + 10 }
+        : { right: ORB_SIZE + 10 };
 
       return h(
         'div',
@@ -1988,7 +2261,8 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
                 onKeyDown: (event) => {
                   if (event.key !== 'Enter' && event.key !== ' ') return;
                   event.preventDefault();
-                  setOpen((value) => !value);
+                  if (open) closeBeads();
+                  else setOpen(true);
                 },
               },
               h(Icon, { name: 'mic' }),
@@ -2004,7 +2278,13 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
                 className: 'dshv-node',
                 'data-on': String(bead.on),
                 'data-tone': bead.tone ?? 'none',
-                style: { '--tx': `${spread[index].tx}px`, '--ty': `${spread[index].ty}px` },
+                'data-docked': spread[index].edge,
+                style: {
+                  '--tx': `${spread[index].tx}px`,
+                  '--ty': `${spread[index].ty}px`,
+                  '--mx': `${spread[index].mx}px`,
+                  '--my': `${spread[index].my}px`,
+                },
               },
               h('span', { className: 'dshv-cap' }, bead.label),
               h(
@@ -2021,27 +2301,51 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
             )),
           ),
         ),
-        // The one thing the bead cannot say by itself: with the models missing,
-        // or a request failed, there is nothing to hear — so it gets a line
-        // beside the bead that leads straight to the settings sheet.
+        // Everything the bead cannot say by itself, in words, sitting beside it
+        // and absolutely placed: the bead itself stays 52 by 52, so nothing here
+        // can widen the floating layer or push it past the edge of the area.
         engine.ready === false
           ? h(Button, {
-              style: { flex: 'none', color: 'var(--dshv-warn)' },
+              style: {
+                ...alertPlacementStyle,
+                position: 'absolute',
+                top: '50%',
+                transform: 'translateY(-50%)',
+                width: 'max-content',
+                flex: 'none',
+                color: 'var(--dshv-warn)',
+              },
               onClick: () => setPanel(true),
             }, `⚠ ${t('notReady')}`)
           : null,
-        engine.error !== null
-          ? h('span', {
-              style: {
-                color: 'var(--dshv-record)',
-                maxWidth: 280,
-                marginLeft: 8,
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
+        // A failure worth reading in full gets the bubble, and the bubble can be
+        // dismissed or opened: a single failed request must not haunt the corner
+        // until the page is reloaded. The models-missing case above is a state,
+        // not an error, so only one of the two is ever on screen.
+        engine.ready !== false && engine.error !== null
+          ? h(
+              'div',
+              {
+                className: 'dshv-alert',
+                // The width is capped here rather than on the text: the bubble is
+                // absolutely placed inside a 52px-wide bead layer, and without an
+                // explicit width it would be squeezed into a vertical sliver.
+                style: { ...alertPlacementStyle, maxWidth: alert.maxWidth },
               },
-              title: engine.error,
-            }, engine.error)
+              h('span', {
+                className: 'dshv-alert-text',
+                style: { cursor: 'pointer' },
+                title: engine.error,
+                onClick: () => setPanel(true),
+              }, engine.error),
+              h('button', {
+                type: 'button',
+                className: 'dshv-alert-close',
+                title: t('close'),
+                'aria-label': t('close'),
+                onClick: () => setEngine({ error: null }),
+              }, h(Icon, { name: 'close', size: 12 })),
+            )
           : null,
         panel
           ? h(SettingsPanel, {
@@ -2071,10 +2375,36 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
       const [refText, setRefText] = useState('');
       const [file, setFile] = useState(null);
       const [, force] = useState(0);
+      const panelRef = useRef(null);
+      const [sheetHeight, setSheetHeight] = useState(0);
       const config = engine.config ?? {};
       const currentVoice = readString(STORAGE.voice, '') || config.voice || 'mimo_default';
       const progress = prepareView(engine.prepare);
-      const place = fitPanel({ bounds: props.bounds ?? viewportBounds(), position: props.position });
+      const bounds = props.bounds ?? viewportBounds();
+      // The sheet is sized against the movable area, not against the window, so a
+      // bead parked low can no longer push it off the bottom of the screen.
+      const limits = panelLimits(bounds, engine.ready !== true);
+      const place = fitPanel({
+        bounds,
+        position: props.position,
+        width: limits.width,
+        height: sheetHeight === 0 ? undefined : sheetHeight,
+      });
+
+      // A folded section opening makes the sheet taller and `fitPanel` has to hear
+      // about it, or the sheet hangs off the area it is meant to fit inside. Only
+      // the height is measured: taking the width from a measurement would resize
+      // the sheet, which would measure it again, forever.
+      useLayoutEffect(() => {
+        const node = panelRef.current;
+        if (node === null) return undefined;
+        const measure = () => setSheetHeight(node.offsetHeight);
+        measure();
+        if (typeof ResizeObserver === 'undefined') return undefined;
+        const observer = new ResizeObserver(measure);
+        observer.observe(node);
+        return () => observer.disconnect();
+      }, []);
 
       const withBusy = async (label, action) => {
         setBusy(label);
@@ -2166,16 +2496,23 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
         h(
           'div',
           {
+            ref: panelRef,
             className: 'dshv-panel',
-            'data-wide': String(engine.ready !== true),
-            style: { ...styles.panel, top: place.y, left: place.x, width: 340 },
+            style: {
+              ...styles.panel,
+              top: place.y,
+              left: place.x,
+              width: limits.width,
+              maxHeight: limits.maxHeight,
+            },
             role: 'dialog',
             'aria-label': t('settings'),
             'aria-modal': 'true',
             onClick: (event) => event.stopPropagation(),
           },
-          // ── header: what it is, and whether it is usable
-          h('div', { style: styles.head },
+          // ── header: what it is, and whether it is usable. It sticks to the top
+          // of the sheet, because a long sheet scrolls behind it.
+          h('div', { className: 'dshv-panelhead' },
             h('h4', null, t('title')),
             h('span', {
               className: 'dshv-readydot',
@@ -2195,6 +2532,11 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
           live.action !== null && live.kind !== 'warn'
             ? h('div', { style: styles.statusRow }, h('span', null, live.text))
             : null,
+          // The bubble beside the bead can be dismissed, so the sheet keeps the
+          // last failure in full: this is the place that never hides it.
+          engine.error !== null
+            ? h('div', { style: styles.error }, String(engine.error))
+            : null,
 
           // ── model preparation: the only long operation, so it gets a real bar
           progress.running
@@ -2209,10 +2551,10 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
             ? h('div', { style: styles.error }, `${t('downloadFailed')}：${progress.error}`)
             : null,
           engine.ready !== true && !progress.running
-            ? h('div', { style: styles.row },
+            ? h('div', { style: { margin: '8px 0 2px' } },
               h(Button, {
+                className: 'dshv-primary',
                 disabled: busy !== null,
-                style: { ...styles.chip, width: 'auto', flex: 1 },
                 onClick: () => void withBusy('准备模型', prepare),
               }, busy === '准备模型' ? t('preparing') : t('prepare')))
             : null,
@@ -2234,20 +2576,21 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
                       `🎤 ${voice.name}（克隆）`)))
                   : null,
               )),
-            voices.map((voice) => h('div', { key: voice.name, className: 'dshv-voicerow' },
-              h('span', {
-                style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-                title: voice.refText || voice.name,
-              }, voice.name),
-              h('span', { style: styles.note }, `${Math.round(voice.bytes / 1024)} KB`),
-              h('audio', { src: client.sampleUrl(voice.name), controls: true }),
-              h(Button, {
-                style: styles.knob,
-                onClick: () => void withBusy('删除音色', async () => {
-                  await client.deleteVoice(voice.name);
-                  await refreshState();
-                }),
-              }, t('remove'))))),
+            voices.map((voice) => h('div', { key: voice.name, className: 'dshv-voicecard' },
+              h('div', { className: 'dshv-voicehead' },
+                h('span', {
+                  style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+                  title: voice.refText || voice.name,
+                }, voice.name),
+                h('span', { style: styles.note }, `${Math.round(voice.bytes / 1024)} KB`),
+                h(Button, {
+                  style: styles.knob,
+                  onClick: () => void withBusy('删除音色', async () => {
+                    await client.deleteVoice(voice.name);
+                    await refreshState();
+                  }),
+                }, t('remove'))),
+              h('audio', { src: client.sampleUrl(voice.name), controls: true })))),
 
           // ── add a clone: collapsed to one line until it is wanted
           h('details', { style: styles.section },
@@ -2271,8 +2614,8 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
               value: refText,
               onChange: (event) => setRefText(event.target.value),
             })),
-            h('div', { style: styles.row },
-              h(Button, { disabled: busy !== null, onClick: upload }, t('create')))),
+            h('div', { style: { margin: '8px 0 2px' } },
+              h(Button, { className: 'dshv-primary', disabled: busy !== null, onClick: upload }, t('create')))),
 
           // ── credentials + language
           h('div', { style: styles.section },
@@ -2432,6 +2775,9 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
                 const audio = await client.tts(job.sentence, voice, controller.signal);
                 if (interruptedRef.current) return;
                 speaker.enqueue(audio);
+                // Speaking again means the failure is behind us. A persistent
+                // problem — an unset key, say — simply reports itself once more.
+                if (engine.error !== null) setEngine({ error: null });
               } catch (error) {
                 if (error?.name !== 'AbortError') {
                   console.error('[voice-chat] TTS failed:', error);
@@ -2461,9 +2807,14 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
         viewportBounds,
         clampPosition,
         snapToEdge,
-        fitBeam,
-        layoutFan,
+        attachTo,
+        refit,
+        nearestEdge,
+        dockLayout,
+        dockCentre,
         waveRadius,
+        panelLimits,
+        alertPlacement,
       },
     };
   },
