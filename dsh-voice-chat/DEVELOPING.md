@@ -122,6 +122,8 @@ $P    = "<本仓库同级>\probe"
   校验它引用的每个 class 组件都渲染了，再生成可截图 HTML。**这个错犯过三次**（B 的胶囊条、
   C 的球体透明、C 的水波纹），每次都是选择器写对了但**作用域方向写反**（`[data-state] .th-c`
   而 `data-state` 挂在 `.th-c` 的子孙上），规则永不匹配。
+  > 预览页支持 **`?freeze=<秒>`**：把展开动画定格在那一刻，用于对**动画中间帧**截图取证
+  > （截图工具抓不到运动中的画面，这一招抓出过两个真问题）。再加 `?skin=dark` 看暗色。
 - `live-verify.mjs`：它同时验证「浏览器半区已注册为 client module」。
 
 **省 token 的跑法**：只改 `client.js` 时跑 `unit-tests` + `live-verify` 就够，**不要每次全跑 5 套**；输出只取 `Select-Object -Last 3`，别把整篇日志倒进对话。
@@ -146,7 +148,10 @@ $P    = "<本仓库同级>\probe"
 - `client.js` **必须是单文件、无构建步骤**（`window.__ModuleLoader__.load({id, factory(require){…}})` 形式）。没有 JSX，用 `React.createElement`。想拆文件要改 `dsh.client.external` 和 chunk 约定，不值当。
 - 改前先读**目标文件的那一段**，不要整篇读。
 - 探索类任务丢给 subagent（它们有独立上下文，不进主对话）。
-- **这个工程没有 git**。任何破坏性改写都没有撤销余地 —— 动多个文件之前先想清楚回滚路径。
+- **这个工程有 git**（仓库根在 `../`，不是"没有 git"—— 曾这么记过，是错的）。发布走
+  `../probe/tools/publish.ps1`，它自己管分支、标签与推送；**不要手工 `git push`**
+  （本地 `main` 与远程 `main` 没有共同祖先，理由见 `../probe/README.md`）。
+  改完先 `git status` 看清工作区，再 `git add -A && git commit`。
 
 ---
 
@@ -205,4 +210,7 @@ return { inject: ['slots', 'locale', 'sessions'], apply(ctx) {
 - **生僻专有名词识别不准**：`纳西妲` → `阿西得`。SenseVoice 词表里没有这个词。可选方案：同音替换后处理 / 换支持热词偏置的识别模型 / 改称呼。
 - **`recent` / `recentStt` 账本会把回归测试的记录混进去**（`live-verify.mjs` 每次跑都写几条）。想分开就给测试请求加个标记字段。
 - **打断阈值是按耳机调的**（振幅 0.06 / 持续 220 ms）。外放音箱更容易误触发。
-- **UI/交互优化的着手点**：工具行目前是四个按钮 + 一个浮层设置面板（`SettingsPanel`），样式用了 `--dsh-*` 主题变量。模型准备进度、音色试听、引擎状态都在那个面板里挤着，是最值得改的地方。
+- ~~UI/交互优化的着手点~~ —— **1.0.1 已处理**：设置面板重排（粘性头 / 音色卡片 / 主按钮）、
+  展开收起的滑动与文字延迟、底部避让到输入框上方、报错气泡可关。再动这一块时：
+  几何都在 `dockLayout` / `dockCentre` / `refit` 这组纯函数里（单测盯着），
+  动画只在 `.dshv-node` 与 `.dshv-bead` 两条 CSS 规则上。

@@ -278,7 +278,7 @@ await test('the orb hugs an edge and its fan never overlaps or escapes', async (
     if (name === 'react') return { createElement: () => null };
     throw new Error(`unexpected require(${name})`);
   });
-  const { clampPosition, snapToEdge, layoutFan, viewportBounds, waveRadius } = pluginHalf.__internals;
+  const { clampPosition, snapToEdge, nearestEdge, dockLayout, dockCentre, viewportBounds, waveRadius } = pluginHalf.__internals;
   const ORB = 52;
   const MARGIN = 6;
   const bounds = { x: 0, y: 0, width: 1000, height: 800 };
@@ -305,58 +305,87 @@ await test('the orb hugs an edge and its fan never overlaps or escapes', async (
     'beyond one bead diameter the bead must stay where it was dropped');
   assert.equal(snapToEdge({ x: 500, y: 300 }, bounds), null, 'open space must not snap');
 
-  const base = [
-    { tx: -138, ty: -8 }, { tx: -94, ty: -46 }, { tx: -46, ty: -68 }, { tx: 4, ty: -72 },
+  // Opening the orb breaks it into four droplets that dock against the nearest
+  // edge, in a line parallel to it. The exclusion pass is gone: spacing alone
+  // separates them, and a line that does not fit is tightened and slid as a whole.
+  const BEAD = 44;
+  const placements = [
+    { position: { x: MARGIN, y: 400 }, edge: 'left' },
+    { position: { x: bounds.width - ORB - MARGIN, y: 400 }, edge: 'right' },
+    { position: { x: 400, y: MARGIN }, edge: 'top' },
+    { position: { x: 400, y: bounds.height - ORB - MARGIN }, edge: 'bottom' },
   ];
-  const spots = [
-    { x: MARGIN, y: MARGIN },
-    { x: bounds.width - ORB - MARGIN, y: MARGIN },
-    { x: MARGIN, y: bounds.height - ORB - MARGIN },
-    { x: bounds.width - ORB - MARGIN, y: bounds.height - ORB - MARGIN },
-    { x: 400, y: 600 },
-    { x: 500, y: 400 },
-    { x: 20, y: 380 },
-  ];
-  for (const position of spots) {
-    const fan = layoutFan(base, position, bounds);
+  for (const { position, edge } of placements) {
     const where = JSON.stringify(position);
-    assert.equal(fan.length, 4, `the fan must keep all four beads at ${where}`);
+    assert.equal(nearestEdge(position, bounds), edge, `nearest edge at ${where}`);
+    const docked = dockLayout(position, bounds, 4);
+    assert.equal(docked.length, 4, `all four beads must be placed at ${where}`);
+    const vertical = edge === 'left' || edge === 'right';
     const centreX = position.x + ORB / 2;
     const centreY = position.y + ORB / 2;
-    for (const { tx, ty } of fan) {
-      assert.ok(centreX + tx - 48 >= bounds.x + MARGIN, `bead left edge escaped at ${where}`);
-      assert.ok(centreX + tx <= bounds.x + bounds.width - MARGIN, `bead right edge escaped at ${where}`);
-      assert.ok(centreY + ty - 68 >= bounds.y + MARGIN, `bead top edge escaped at ${where}`);
-      assert.ok(centreY + ty <= bounds.y + bounds.height - MARGIN, `bead bottom edge escaped at ${where}`);
-    }
-    for (let a = 0; a < fan.length; a += 1) {
-      for (let b = a + 1; b < fan.length; b += 1) {
-        const overlapX = 48 - Math.abs(fan[b].tx - fan[a].tx);
-        const overlapY = 68 - Math.abs(fan[b].ty - fan[a].ty);
-        assert.ok(overlapX <= 0 || overlapY <= 0, `beads ${a} and ${b} overlap at ${where}`);
+    // One column alongside a vertical edge, one row along a horizontal one.
+    assert.equal(new Set(docked.map((offset) => (vertical ? offset.tx : offset.ty))).size, 1,
+      `docked beads must share one ${vertical ? 'column' : 'row'} at ${where}`);
+    for (const offset of docked) {
+      assert.equal(offset.edge, edge, `every docked bead must carry its edge at ${where}`);
+      const left = centreX + offset.tx - BEAD;
+      const right = centreX + offset.tx;
+      const top = centreY + offset.ty - BEAD;
+      const bottom = centreY + offset.ty;
+      // Flush means flush: no margin at all, exactly like the orb when it snaps.
+      if (edge === 'left') assert.ok(Math.abs(left - bounds.x) < 1e-6, `a left-docked bead must touch the left edge at ${where}`);
+      if (edge === 'right') assert.ok(Math.abs(right - (bounds.x + bounds.width)) < 1e-6, `a right-docked bead must touch the right edge at ${where}`);
+      if (edge === 'top') assert.ok(Math.abs(top - bounds.y) < 1e-6, `a top-docked bead must touch the top edge at ${where}`);
+      if (edge === 'bottom') assert.ok(Math.abs(bottom - (bounds.y + bounds.height)) < 1e-6, `a bottom-docked bead must touch the bottom edge at ${where}`);
+      assert.ok(left >= bounds.x - 1e-6 && right <= bounds.x + bounds.width + 1e-6, `a bead escaped sideways at ${where}`);
+      assert.ok(top >= bounds.y - 1e-6 && bottom <= bounds.y + bounds.height + 1e-6, `a bead escaped vertically at ${where}`);
+      // Mid-flight it is already on the edge and level with the orb: out first,
+      // then the edge pulls it along. That is what bends the splash.
+      if (vertical) {
+        assert.ok(Math.abs(offset.mx - offset.tx) < 1e-6, `a vertical-edge splash must fly straight out at ${where}`);
+        assert.ok(Math.abs(offset.my - BEAD / 2) < 1e-6, `and start level with the orb at ${where}`);
+      } else {
+        assert.ok(Math.abs(offset.my - offset.ty) < 1e-6, `a horizontal-edge splash must fly straight out at ${where}`);
+        assert.ok(Math.abs(offset.mx - BEAD / 2) < 1e-6, `and start level with the orb at ${where}`);
       }
     }
+    const centres = docked
+      .map((offset) => (vertical ? centreY + offset.ty - BEAD / 2 : centreX + offset.tx - BEAD / 2))
+      .sort((a, b) => a - b);
+    for (let index = 1; index < centres.length; index += 1) {
+      assert.ok(centres[index] - centres[index - 1] >= BEAD - 1e-6,
+        `docked beads must not overlap at ${where}`);
+    }
+    // With room to spare the line stays centred on where the orb was, and the orb
+    // comes back to the middle of that line once the beads merge.
+    const along = docked.map((offset) => (vertical ? offset.ty : offset.tx));
+    const middle = along.reduce((sum, value) => sum + value, 0) / along.length;
+    assert.ok(Math.abs(middle - BEAD / 2) < 1e-6, `the line must be centred on the orb at ${where}`);
+    const back = dockCentre(position, bounds, docked);
+    if (vertical) {
+      assert.ok(Math.abs(back.y - centreY) < 1e-6, `the orb must return to the middle of the column at ${where}`);
+      assert.ok(Math.abs(back.x - (centreX + docked[0].tx - BEAD / 2)) < 1e-6, `and onto the bead line at ${where}`);
+    } else {
+      assert.ok(Math.abs(back.x - centreX) < 1e-6, `the orb must return to the middle of the row at ${where}`);
+      assert.ok(Math.abs(back.y - (centreY + docked[0].ty - BEAD / 2)) < 1e-6, `and onto the bead line at ${where}`);
+    }
   }
 
-  // A cramped area forces the reflection path rather than a clamp.
+  // A cramped area tightens the line and slides it as a whole: nothing escapes,
+  // even though nothing bounces off an edge any more.
   const small = { x: 0, y: 0, width: 200, height: 200 };
-  const cramped = layoutFan(base, { x: 100, y: 100 }, small);
-  assert.ok(cramped.some((offset, index) => offset.tx !== base[index].tx || offset.ty !== base[index].ty),
-    'a cramped area must move the beads inward');
-
-  // Stuck to a vertical edge the beads line up in a column alongside it.
-  const column = layoutFan(base, { x: MARGIN, y: 300, edge: 'left' }, bounds, 'left');
-  assert.equal(new Set(column.map((offset) => offset.tx)).size, 1,
-    'beads clinging to a vertical edge must share one column');
-  const stacked = column.map((offset) => offset.ty).sort((a, b) => a - b);
-  for (let index = 1; index < stacked.length; index += 1) {
-    assert.ok(Math.abs(stacked[index] - stacked[index - 1]) >= 68,
-      'stacked beads must not overlap');
+  const cramped = dockLayout({ x: 100, y: 100 }, small, 4);
+  assert.equal(cramped.length, 4, 'a cramped area must still place every bead');
+  for (const offset of cramped) {
+    const centreX = 100 + ORB / 2;
+    const centreY = 100 + ORB / 2;
+    const left = centreX + offset.tx - BEAD;
+    const right = centreX + offset.tx;
+    const top = centreY + offset.ty - BEAD;
+    const bottom = centreY + offset.ty;
+    assert.ok(left >= -1e-6 && right <= small.width + 1e-6, 'a cramped bead escaped sideways');
+    assert.ok(top >= -1e-6 && bottom <= small.height + 1e-6, 'a cramped bead escaped vertically');
   }
-  // Stuck to a horizontal edge they line up in a row instead.
-  const row = layoutFan(base, { x: 400, y: MARGIN, edge: 'top' }, bounds, 'top');
-  assert.equal(new Set(row.map((offset) => offset.ty)).size, 1,
-    'beads clinging to a horizontal edge must share one row');
 
   // The silhouette goes flat against the wet surface and stays round away from
   // it; left/right and top/bottom are mirror pairs.
@@ -376,6 +405,63 @@ await test('the orb hugs an edge and its fan never overlaps or escapes', async (
   // Free-floating stays a circle.
   assert.deepEqual(corners(null, 'h'), [50, 50, 50, 50]);
   assert.deepEqual(corners(null, 'v'), [50, 50, 50, 50]);
+});
+
+await test('a reshaped area takes a stuck bead with it, and the sheet stays inside', async () => {
+  let spec = null;
+  globalThis.window = { __ModuleLoader__: { load: (value) => { spec = value; } } };
+  await import(`${url('client.js')}?unit=4`);
+  const pluginHalf = spec.factory((name) => {
+    if (name === 'react') return { createElement: () => null };
+    throw new Error(`unexpected require(${name})`);
+  });
+  const { attachTo, refit, clampPosition, panelLimits, alertPlacement } = pluginHalf.__internals;
+  const ORB = 52;
+  const bounds = { x: 0, y: 0, width: 1000, height: 800 };
+
+  // The movable area changes shape without the window changing size — dragging
+  // the divider beside the conversation does exactly that — so a bead wetted to
+  // an edge has to follow that edge instead of being left behind.
+  const reshaped = {
+    left: { x: 120, y: 0, width: 700, height: 800 },
+    right: { x: 0, y: 0, width: 640, height: 600 },
+    top: { x: 0, y: 40, width: 1000, height: 700 },
+    bottom: { x: 0, y: 0, width: 900, height: 520 },
+  };
+  const flush = {
+    left: (area) => area.x,
+    right: (area) => area.x + area.width - ORB,
+    top: (area) => area.y,
+    bottom: (area) => area.y + area.height - ORB,
+  };
+  for (const edge of ['left', 'right', 'top', 'bottom']) {
+    const from = { x: 300, y: 260, edge };
+    const area = reshaped[edge];
+    const settled = refit(from, area);
+    assert.equal(settled.edge, edge, `refit must keep the edge it had (${edge})`);
+    assert.deepEqual(settled, attachTo(edge, from, area), `refit must agree with attachTo (${edge})`);
+    const along = edge === 'left' || edge === 'right' ? settled.x : settled.y;
+    assert.equal(along, flush[edge](area), `a ${edge}-stuck bead must touch the new ${edge} edge`);
+  }
+
+  // A free bead is only kept inside, and must not silently become attached.
+  assert.deepEqual(refit({ x: 4000, y: 4000, edge: null }, bounds),
+    { ...clampPosition({ x: 4000, y: 4000 }, bounds), edge: null });
+
+  // The sheet is bounded by the movable area, so a bead parked near the bottom
+  // cannot push it off screen; both callers read their numbers from here.
+  assert.deepEqual(panelLimits({ x: 0, y: 0, width: 300, height: 240 }, false, bounds),
+    { width: 284, maxHeight: 224 }, 'the sheet must fit inside a narrow area');
+  assert.deepEqual(panelLimits(bounds, true, bounds), { width: 420, maxHeight: 656 },
+    'a wide sheet caps at 420 wide and 82% of the viewport');
+
+  // The error bubble goes to whichever side of the bead has room, so a bead in
+  // the right half can no longer push the message off screen.
+  assert.equal(alertPlacement({ x: 900, y: 300 }, bounds).side, 'left');
+  assert.equal(alertPlacement({ x: 20, y: 300 }, bounds).side, 'right');
+  const tight = { x: 0, y: 0, width: 200, height: 300 };
+  assert.equal(alertPlacement({ x: 20, y: 100 }, tight).maxWidth, 118);
+  assert.equal(alertPlacement({ x: 60, y: 100 }, tight).maxWidth, 96);
 });
 
 await test('config path helpers are stable', async () => {

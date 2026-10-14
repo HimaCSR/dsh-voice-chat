@@ -31,19 +31,20 @@ const SPEAKER = '<path d="M4 9.6h3.1L12 5.6v12.8l-4.9-4H4z"/><path d="M15.4 9.6a
 const BOLT = '<path d="M13.3 2.4 5.6 13.3h4.9l-1.1 8.3 8.1-11.2h-5z"/>';
 const GEAR = '<path d="M19.4 13a7.6 7.6 0 0 0 0-2l2-1.6-2-3.4-2.4 1a7.6 7.6 0 0 0-1.7-1L15 3.3h-4l-.3 2.7a7.6 7.6 0 0 0-1.7 1l-2.4-1-2 3.4 2 1.6a7.6 7.6 0 0 0 0 2l-2 1.6 2 3.4 2.4-1c.5.4 1.1.7 1.7 1l.3 2.7h4l.3-2.7c.6-.2 1.2-.6 1.7-1l2.4 1 2-3.4z"/><circle cx="12" cy="12" r="2.6"/>';
 
-const bead = (label, paths, tx, ty, on, tone) =>
-  `<div class="dshv-node" data-on="${on}" data-tone="${tone}" style="--tx:${tx}px;--ty:${ty}px">` +
+const bead = (label, paths, tx, ty, on, tone, docked, mx, my) =>
+  `<div class="dshv-node" data-on="${on}" data-tone="${tone}" data-docked="${docked}"` +
+  ` style="--tx:${tx}px;--ty:${ty}px;--mx:${mx}px;--my:${my}px">` +
   `<span class="dshv-cap">${label}</span>` +
   `<button class="dshv-bead" type="button">${icon(paths, 19)}</button></div>`;
 
 // Mirrors the inline `styles` object plus the CSS classes client.js renders.
 const panel = `
-<div class="dshv-panel" data-wide="true" style="position:relative;z-index:60;width:340px;padding:14px;border-radius:22px;
+<div class="dshv-panel" style="position:relative;z-index:60;width:340px;max-height:520px;padding:14px;border-radius:22px;
   border:1px solid var(--dshv-glass-stroke);background:var(--dshv-glass);
   backdrop-filter:blur(30px) saturate(180%);-webkit-backdrop-filter:blur(30px) saturate(180%);
   box-shadow:var(--dshv-glass-shadow),inset 0 1px 0 var(--dshv-glass-inner);
   color:var(--dsw-alias-label-primary,inherit);font-size:12px;line-height:1.6">
-  <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+  <div class="dshv-panelhead">
     <h4 style="margin:0;font-size:13px;font-weight:600">DSH-Voice</h4>
     <i class="dshv-readydot" style="color:#10b981"></i>
     <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11.5px;
@@ -60,12 +61,14 @@ const panel = `
         <optgroup label="新建克隆音色"><option>🎤 009_起风的时候…（克隆）</option></optgroup>
       </select>
     </div>
-    <div class="dshv-voicerow" style="display:flex;align-items:center;gap:6px;margin:5px 0">
-      <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">009_起风的时候…</span>
-      <span style="color:var(--dsw-alias-label-tertiary,inherit);font-size:11px">65 KB</span>
-      <audio controls style="height:26px;max-width:132px"></audio>
-      <button style="display:inline-flex;align-items:center;height:26px;padding:0 9px;border-radius:10px;border:1px solid transparent;
-        background:var(--dshv-field);color:inherit;font:inherit;font-size:12px;cursor:pointer">删除</button>
+    <div class="dshv-voicecard">
+      <div class="dshv-voicehead">
+        <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">009_起风的时候…</span>
+        <span style="color:var(--dsw-alias-label-tertiary,inherit);font-size:11px">65 KB</span>
+        <button style="display:inline-flex;align-items:center;height:26px;padding:0 9px;border-radius:10px;border:1px solid transparent;
+          background:var(--dshv-field);color:inherit;font:inherit;font-size:12px;cursor:pointer">删除</button>
+      </div>
+      <audio controls style="width:100%;height:26px"></audio>
     </div>
   </div>
 
@@ -92,21 +95,29 @@ const panel = `
   </details>
 </div>`;
 
-const fanBeads = [
-  bead('麦克风', MIC, -138, -8, '__MIC_ON__', '__MIC_TONE__'),
-  bead('朗读', SPEAKER, -94, -46, 'false', 'none'),
-  bead('插话', BOLT, -46, -68, 'false', 'none'),
-  bead('设置', GEAR, 4, -72, 'false', 'none'),
+// Opening splashes the beads out to the nearest edge and docks them flush against
+// it: a column for a vertical edge, a row for a horizontal one — no margin, and
+// the label floats outside the bead. Both preview states park the orb near the
+// right edge, so both show that column. The last four slots are the gather point
+// (mx/my) and the crest of the arc (ox/oy): thrown sideways by more than the orb
+// is tall, then falling onto the edge and bouncing off it.
+// Opening glides the beads out to the nearest edge and docks them flush against
+// it: a column for a vertical edge, a row for a horizontal one — no margin, and
+// the label floats outside the bead. Both preview states park the orb near the
+// right edge, so both show that column. The last pair is the gather point the
+// droplets merge into when they close.
+const dockedBeads = [
+  bead('麦克风', MIC, 43, -71, '__MIC_ON__', '__MIC_TONE__', 'right', 43, 22),
+  bead('朗读', SPEAKER, 43, -9, 'false', 'none', 'right', 43, 22),
+  bead('插话', BOLT, 43, 53, 'false', 'none', 'right', 43, 22),
+  bead('设置', GEAR, 43, 115, 'false', 'none', 'right', 43, 22),
 ].join('\n            ');
 
-// Stuck to an edge the beads line up alongside it: a column for a vertical
-// edge, a row for a horizontal one.
-const columnBeads = [
-  bead('麦克风', MIC, 0, -111, '__MIC_ON__', '__MIC_TONE__'),
-  bead('朗读', SPEAKER, 0, -37, 'false', 'none'),
-  bead('插话', BOLT, 0, 37, 'false', 'none'),
-  bead('设置', GEAR, 0, 111, 'false', 'none'),
-].join('\n            ');
+// The two placements of the error bubble, and what it is for: a bead on the right
+// half used to push its message straight off the screen.
+const alertHtml = (side) => `<div class="dshv-alert" style="${side === 'left' ? 'right:62px' : 'left:62px'};max-width:220px">`
+  + '<span class="dshv-alert-text">朗读失败：未配置 TTS API Key，请在设置面板里填写，或设置环境变量 MIMO_API_KEY。</span>'
+  + '<button class="dshv-alert-close" type="button" aria-label="关闭">✕</button></div>';
 
 const html = `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
@@ -130,8 +141,10 @@ body[data-ds-dark-theme] .stage{border-color:rgba(255,255,255,.14);
 .bubble.user{align-self:flex-end;background:rgba(120,120,128,.22)}
 .bubble.bot{align-self:flex-start;background:rgba(255,255,255,.66);border:1px solid rgba(255,255,255,.7);color:#61666b}
 body[data-ds-dark-theme] .bubble.bot{background:rgba(255,255,255,.10);border-color:rgba(255,255,255,.12);color:#cfd3d6}
-.spacer{flex:1}
-.anchor{position:relative;margin-left:auto;margin-right:8px;padding-top:190px}
+.spacer{height:230px}
+/* The bead is fixed-position, so it is out of flow: without a width the anchor
+   would collapse to zero and the orb would hang off the right edge. */
+.anchor{position:relative;width:52px;margin-left:auto;margin-right:8px;padding-top:190px}
 .orbwrap{position:relative;width:52px;height:52px}
 h2{font-size:13px;margin:0}
 ${css}
@@ -143,7 +156,7 @@ ${css}
     <div class="bubble user">把设置面板的字看清楚点</div>
     <div class="bubble bot">这一段用的是 client.js 里真正发出去的那段 CSS。</div>
     __SPACER__
-    <div class="anchor">
+    <div class="anchor"__ANCHOR_STYLE__>
       <div class="dshv" data-state="__STATE__" data-expanded="__OPEN__" data-attached="__ATTACH__">
         <div class="dshv-orbwrap">
           <span class="dshv-wave"></span>
@@ -152,6 +165,7 @@ ${css}
             __BEADS__
           </div>
         </div>
+        __ALERT__
       </div>
     </div>
   </div>
@@ -160,6 +174,25 @@ ${css}
 <script>
 var q = new URLSearchParams(location.search);
 if (q.get('skin') === 'dark') document.body.setAttribute('data-ds-dark-theme', '');
+// ?freeze=0.28 holds the splash at that moment so a still frame can be captured:
+// a screenshot tool cannot otherwise catch a moving animation.
+var freeze = q.get('freeze');
+if (freeze !== null) {
+  var at = parseFloat(freeze);
+  var stagger = [0, 0.04, 0.11, 0.18];
+  document.querySelectorAll('.dshv-node').forEach(function (node, index) {
+    node.style.animationPlayState = 'paused';
+    node.style.animationDelay = '-' + freeze + 's';
+    // The label and the glyph fade in on their own schedule, so a frozen frame has
+    // to show them the way that moment really looks: a screenshot would otherwise
+    // let the transition run to completion and show them too early.
+    var shown = at >= 0.58 + (stagger[index] || 0) ? '1' : '0';
+    node.querySelectorAll('.dshv-cap, .dshv-bead > svg').forEach(function (el) {
+      el.style.transition = 'none';
+      el.style.opacity = shown;
+    });
+  });
+}
 // Reproduce the rAF driver so the speaking silhouette can be seen deformed.
 var orb = document.querySelector('.dshv-orb');
 var root = document.querySelector('.dshv');
@@ -200,9 +233,12 @@ const states = {
   'attached-right': { state: 'idle', open: 'false', micOn: 'false', micTone: 'none', attach: 'right' },
   'attached-top': { state: 'idle', open: 'false', micOn: 'false', micTone: 'none', attach: 'top' },
   'attached-bottom': { state: 'idle', open: 'false', micOn: 'false', micTone: 'none', attach: 'bottom' },
+  'alert-right': {
+    state: 'idle', open: 'false', micOn: 'false', micTone: 'none', alert: 'right', anchorLeft: true,
+  },
+  'alert-left': { state: 'idle', open: 'false', micOn: 'false', micTone: 'none', alert: 'left' },
   'attached-expanded': {
-    state: 'listening', open: 'true', micOn: 'true', micTone: 'record',
-    attach: 'left', beads: 'column',
+    state: 'listening', open: 'true', micOn: 'true', micTone: 'record', attach: 'left',
   },
 };
 
@@ -219,12 +255,18 @@ for (const [name, spec] of Object.entries(states)) {
     'attached-top': '吸在上边缘：竖向压扁、向下坠',
     'attached-bottom': '吸在下边缘：竖向压扁、往上贴',
     'attached-expanded': '吸边状态展开：四颗小胶球沿边缘**平行排成一列**',
+    'alert-right': '报错气泡（球在左半边）：排在球的右侧，可 ✕ 关掉，也可点开设置',
+    'alert-left': '报错气泡（球贴右边缘）：改排到左侧，不再怼出屏幕',
   }[name];
   const file = path.join(here, 'orb-live-' + name + '.html');
   fs.writeFileSync(file, html
     .replace('__CAPTION__', caption)
     .replace('__PANEL__', spec.attach ? '' : panel)
-    .replace('__BEADS__', spec.beads === 'column' ? columnBeads : fanBeads)
+    .replace('__BEADS__', dockedBeads)
+    .replace('__ALERT__', spec.alert ? alertHtml(spec.alert) : '')
+    // The bubble goes on the side with room, so the bead has to be on the other
+    // one: a bead at the right edge with a right-hand bubble cannot happen.
+    .replace('__ANCHOR_STYLE__', spec.anchorLeft ? ' style="margin-left:0;margin-right:auto"' : '')
     .replace('__SPACER__', spec.attach ? '' : '<div class="spacer"></div>')
     .replace('__ATTACH__', spec.attach ?? 'none')
     .replace('__STATE__', spec.state)
