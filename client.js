@@ -837,6 +837,7 @@ registerProcessor('voice-chat-mic', MicCapture);
       providerSection: 'TTS 服务',
       providerHint: '选择朗读用的服务。可添加自定义服务，只要它使用 MiMo 或 OpenAI 兼容的接口格式。',
       addProvider: '添加服务',
+      editCurrentProvider: '编辑当前服务',
       editProvider: '修改服务',
       providerId: '服务标识',
       providerIdHint: '只能用小写字母、数字和短横线；创建后不可更改。',
@@ -856,6 +857,7 @@ registerProcessor('voice-chat-mic', MicCapture);
       providerKind: '接口格式',
       kind_mimo: 'MiMo（chat/completions）',
       kind_openaispeech: 'OpenAI 兼容（/audio/speech）',
+      kind_siliconflow: '硅基流动（/audio/speech + 音色注册）',
       kind_devtone: '本地测试音',
       referenceProviders: '参考配置',
       referenceHint: '下面两项是已验证可用的免费参考配置，点一下即可填入表单。',
@@ -978,6 +980,7 @@ registerProcessor('voice-chat-mic', MicCapture);
       providerSection: 'TTS service',
       providerHint: 'Choose the service that reads the replies. You can add your own as long as it speaks the MiMo or the OpenAI-compatible format.',
       addProvider: 'Add service',
+      editCurrentProvider: 'Edit the service in use',
       editProvider: 'Edit service',
       providerId: 'Service id',
       providerIdHint: 'Lowercase letters, digits and dashes only; it cannot be changed later.',
@@ -997,6 +1000,7 @@ registerProcessor('voice-chat-mic', MicCapture);
       providerKind: 'Wire format',
       kind_mimo: 'MiMo (chat/completions)',
       kind_openaispeech: 'OpenAI-compatible (/audio/speech)',
+      kind_siliconflow: 'SiliconFlow (/audio/speech + voice registration)',
       kind_devtone: 'Local test tone',
       referenceProviders: 'Reference setups',
       referenceHint: 'These two were verified to work. Click one to fill the form with it.',
@@ -2772,6 +2776,7 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
       const [minRms, setMinRms] = useState(() => readSlider('minRms', SENSITIVITY.minRms));
       // The provider form, for adding or editing one.
       const [providerForm, setProviderForm] = useState(null);
+      const [formOpen, setFormOpen] = useState(true);
       const config = engine.config ?? {};
       const currentVoice = readString(STORAGE.voice, '') || config.voice || 'mimo_default';
       const progress = prepareView(engine.prepare);
@@ -3003,8 +3008,8 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
 
       // Add or change one provider.
       const saveProvider = () => {
-        if (providerForm === null) return;
-        const record = { ...providerForm };
+        if (form === null) return;
+        const record = { ...form };
         void withBusy('保存服务', async () => {
           const payload = await client.saveProvider(record);
           setProviders(payload.providers ?? []);
@@ -3138,96 +3143,128 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
       // version check.
       // A new provider needs an id the Host will accept; an existing one has
       // its id already and cannot change it.
-      const providerFormReady = providerForm === null
+      // The shape the form starts from when it is pointed at a known service.
+      // The key is left out on purpose: it is never handed back to the
+      // browser, and the form has its own field for it.
+      const providerFormFrom = (entry) => ({
+        id: entry.id,
+        label: entry.label ?? '',
+        kind: entry.kind ?? 'openai-speech',
+        baseUrl: entry.baseUrl ?? '',
+        model: entry.model ?? '',
+        voice: entry.voice ?? '',
+        format: entry.format ?? 'wav',
+        apiKey: '',
+        apiKeyEnv: entry.apiKeyEnv ?? '',
+        clone: entry.clone === true,
+        existing: true,
+      });
+      // The form is only there while it is being used: it opens on "edit
+      // the service in use" or on "add a service", and closing it puts it
+      // away again.
+      const form = providerForm;
+      const providerFormReady = form === null
         ? false
-        : providerForm.existing === true || PROVIDER_ID_PATTERN.test(providerForm.id.trim());
-      const providerFormView = providerForm === null ? null : h('details', {
+        : form.existing === true || PROVIDER_ID_PATTERN.test(form.id.trim());
+      const providerFormView = form === null ? null : h('details', {
         style: styles.section,
-        open: true,
+        // React re-renders the open attribute, so the browser's own toggle
+        // has to be reported back or the form springs open again.
+        open: formOpen,
+        onToggle: (event) => setFormOpen(event.currentTarget.open),
       },
-        h('summary', { style: { cursor: 'pointer', fontSize: 12.5, fontWeight: 600 } },
-          providerForm.existing === true ? t('editProvider') : t('addProvider')),
+        // The way out sits at the top of the form. At the bottom it was only
+        // reachable after scrolling the whole form past the last field, and
+        // the full-width button beside it had squeezed its own text out of
+        // sight.
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+          h('summary', {
+            style: { cursor: 'pointer', fontSize: 12.5, fontWeight: 600, flex: '1 1 auto', minWidth: 0 },
+          }, form.existing === true ? t('editProvider') : t('addProvider')),
+          h(Button, {
+            style: { ...styles.knob, flex: 'none' },
+            onClick: () => setProviderForm(null),
+          }, t('close'))),
         h('div', { style: styles.row }, h('span', { style: styles.label }, t('providerId')),
           h('input', {
             style: { ...styles.field, flex: 1, minWidth: 0 },
-            value: providerForm.id,
+            value: form.id,
             placeholder: 'my-tts',
-            disabled: providerForm.existing === true,
-            onChange: (event) => setProviderForm({ ...providerForm, id: event.target.value }),
+            disabled: form.existing === true,
+            onChange: (event) => setProviderForm({ ...form, id: event.target.value }),
           })),
-        providerForm.existing === true
+        form.existing === true
           ? null
           : h('div', { style: styles.note }, t('providerIdHint'),
             // The id becomes a key in the stored map, so it is checked before
             // the request is made rather than after it comes back refused.
-            PROVIDER_ID_PATTERN.test(providerForm.id.trim())
+            PROVIDER_ID_PATTERN.test(form.id.trim())
               ? null
               : h('div', { style: { color: '#e8a33d', marginTop: 3 } }, t('providerIdInvalid'))),
         h('div', { style: styles.row }, h('span', { style: styles.label }, t('providerLabel')),
           h('input', {
             style: { ...styles.field, flex: 1, minWidth: 0 },
-            value: providerForm.label ?? '',
-            onChange: (event) => setProviderForm({ ...providerForm, label: event.target.value }),
+            value: form.label ?? '',
+            onChange: (event) => setProviderForm({ ...form, label: event.target.value }),
           })),
         h('div', { style: styles.row }, h('span', { style: styles.label }, t('providerKind')),
           h('select', {
             style: { ...styles.field, flex: 1 },
-            value: providerForm.kind ?? 'openai-speech',
-            onChange: (event) => setProviderForm({ ...providerForm, kind: event.target.value }),
-          }, ['mimo', 'openai-speech', 'dev-tone'].map((kind) =>
+            value: form.kind ?? 'openai-speech',
+            onChange: (event) => setProviderForm({ ...form, kind: event.target.value }),
+          }, ['mimo', 'openai-speech', 'siliconflow', 'dev-tone'].map((kind) =>
             h('option', { key: kind, value: kind }, t(`kind_${kind.replace(/-/g, '')}`))))),
         h('div', { style: styles.row }, h('span', { style: styles.label }, t('providerBaseUrl')),
           h('input', {
             style: { ...styles.field, flex: 1, minWidth: 0 },
-            value: providerForm.baseUrl ?? '',
+            value: form.baseUrl ?? '',
             placeholder: 'https://api.example.com/v1',
-            onChange: (event) => setProviderForm({ ...providerForm, baseUrl: event.target.value }),
+            onChange: (event) => setProviderForm({ ...form, baseUrl: event.target.value }),
           })),
         h('div', { style: styles.row }, h('span', { style: styles.label }, t('providerModel')),
           h('input', {
             style: { ...styles.field, flex: 1, minWidth: 0 },
-            value: providerForm.model ?? '',
-            onChange: (event) => setProviderForm({ ...providerForm, model: event.target.value }),
+            value: form.model ?? '',
+            onChange: (event) => setProviderForm({ ...form, model: event.target.value }),
           })),
         h('div', { style: styles.row }, h('span', { style: styles.label }, t('providerVoice')),
           h('input', {
             style: { ...styles.field, flex: 1, minWidth: 0 },
-            value: providerForm.voice ?? '',
-            onChange: (event) => setProviderForm({ ...providerForm, voice: event.target.value }),
+            value: form.voice ?? '',
+            onChange: (event) => setProviderForm({ ...form, voice: event.target.value }),
           })),
         h('div', { style: styles.row }, h('span', { style: styles.label }, t('providerFormat')),
           h('select', {
             style: { ...styles.field, flex: 1 },
-            value: providerForm.format ?? 'wav',
-            onChange: (event) => setProviderForm({ ...providerForm, format: event.target.value }),
+            value: form.format ?? 'wav',
+            onChange: (event) => setProviderForm({ ...form, format: event.target.value }),
           }, ['wav', 'mp3', 'pcm'].map((format) => h('option', { key: format, value: format }, format)))),
         h('div', { style: styles.row }, h('span', { style: styles.label }, t('providerApiKey')),
           h('input', {
             style: { ...styles.field, flex: 1, minWidth: 0 },
             type: 'password',
             placeholder: 'sk-…',
-            value: providerForm.apiKey ?? '',
-            onChange: (event) => setProviderForm({ ...providerForm, apiKey: event.target.value }),
+            value: form.apiKey ?? '',
+            onChange: (event) => setProviderForm({ ...form, apiKey: event.target.value }),
           })),
         h('div', { style: styles.row }, h('span', { style: styles.label }, t('providerApiKeyEnv')),
           h('input', {
             style: { ...styles.field, flex: 1, minWidth: 0 },
-            value: providerForm.apiKeyEnv ?? '',
-            onChange: (event) => setProviderForm({ ...providerForm, apiKeyEnv: event.target.value }),
+            value: form.apiKeyEnv ?? '',
+            onChange: (event) => setProviderForm({ ...form, apiKeyEnv: event.target.value }),
           })),
         h('div', { style: styles.row }, h('span', { style: styles.label }, t('providerClone')),
           h('input', {
             type: 'checkbox',
-            checked: providerForm.clone === true,
-            onChange: (event) => setProviderForm({ ...providerForm, clone: event.target.checked }),
+            checked: form.clone === true,
+            onChange: (event) => setProviderForm({ ...form, clone: event.target.checked }),
           })),
-        h('div', { style: { margin: '8px 0 2px', display: 'flex', gap: 8 } },
+        h('div', { style: { margin: '8px 0 2px' } },
           h(Button, {
             className: 'dshv-primary',
             disabled: busy !== null || !providerFormReady,
             onClick: saveProvider,
-          }, t('save')),
-          h(Button, { style: styles.knob, onClick: () => setProviderForm(null) }, t('close'))),
+          }, t('save'))),
       );
 
       const dependencyRow = (entry) => h('div', { key: entry.name, className: 'dshv-dep' },
@@ -3264,10 +3301,18 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
             h('select', {
               style: { ...styles.field, flex: 1 },
               value: config.provider ?? 'mimo',
-              onChange: (event) => void withBusy('切换服务', async () => {
-                await client.configure({ provider: event.target.value });
-                await refreshState();
-              }),
+              onChange: (event) => {
+                // Choosing a service also loads its settings into the form
+                // below. The list offered the same services a second time as
+                // "recommended" buttons, which read as a duplicate of the
+                // menu right above them.
+                const entry = providerList.find((item) => item.id === event.target.value);
+                if (entry) setProviderForm(providerFormFrom(entry));
+                void withBusy('切换服务', async () => {
+                  await client.configure({ provider: event.target.value });
+                  await refreshState();
+                });
+              },
             }, providerList.map((entry) => h('option', { key: entry.id, value: entry.id }, entry.label))),
             // A custom provider can be removed again; a built-in one cannot,
             // because it is the fallback the plugin falls back to.
@@ -3285,23 +3330,22 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
               : null,
           ),
           h('div', { style: { margin: '6px 0 2px', display: 'flex', gap: 8, flexWrap: 'wrap' } },
+            // The menu above switches between services; these two do the
+            // other half of the work — change the one in use, or bring a new
+            // one in.
+            selectedProvider
+              ? h(Button, {
+                style: styles.knob,
+                onClick: () => setProviderForm(providerFormFrom(selectedProvider)),
+              }, t('editCurrentProvider'))
+              : null,
             h(Button, {
               style: styles.knob,
               onClick: () => setProviderForm({
                 id: '', label: '', kind: 'openai-speech', baseUrl: '', model: '', voice: '',
                 format: 'mp3', apiKey: '', apiKeyEnv: '', clone: false, existing: false,
               }),
-            }, t('addProvider')),
-            // The two verified free reference setups, offered as one click.
-            providerList.filter((entry) => entry.reference === true).map((entry) =>
-              h(Button, {
-                style: styles.knob,
-                onClick: () => setProviderForm({
-                  id: entry.id, label: entry.label, kind: entry.kind, baseUrl: entry.baseUrl,
-                  model: entry.model, voice: entry.voice, format: entry.format,
-                  apiKey: '', apiKeyEnv: entry.apiKeyEnv, clone: false, existing: true,
-                }),
-              }, entry.label))),
+            }, t('addProvider'))),
           ),
           providerFormView,
           h('div', { style: styles.row },
