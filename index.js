@@ -192,6 +192,14 @@ export function apply(ctx, rawConfig = {}) {
   const recent = [];
   /** Recent recognitions: time, audio length, speech length and transcript. */
   const recentStt = [];
+  /**
+   * Failures the browser half ran into.
+   *
+   * The client cannot write to the disk, so it reports them here. Without
+   * this a failed read-out looks the same as a failed synthesis, and the
+   * reason for it is lost with the console.
+   */
+  const clientErrors = [];
   /** The plugin's own version, read once at start-up. */
   let pluginVersion = null;
   /** The dispose handle of the registered persona prompt section. */
@@ -325,6 +333,9 @@ export function apply(ctx, rawConfig = {}) {
         label: record.label || record.id,
         kind: record.kind ?? 'mimo',
         clone: record.clone === true,
+        // SiliconFlow matches the words against the sample, so a clone needs
+        // the transcript; MiMo does not.
+        cloneNeedsTranscript: record.kind === 'siliconflow',
         builtin: record.builtin === true,
         reference: record.reference === true,
         hint: record.hint ?? null,
@@ -405,6 +416,19 @@ export function apply(ctx, rawConfig = {}) {
   function noteStt(entry) {
     recentStt.unshift({ at: new Date().toISOString(), ...entry });
     recentStt.length = Math.min(recentStt.length, 8);
+  }
+
+  /**
+   * Record a failure the browser half ran into.
+   *
+   * The message the user sees is the same one the client shows, so the
+   * reason for a failure that only ever appears in the browser is still
+   * answerable after the fact.
+   */
+  function noteClientError(entry) {
+    clientErrors.unshift({ at: new Date().toISOString(), ...entry });
+    clientErrors.length = Math.min(clientErrors.length, 8);
+    log(`client failure at ${entry.where}: ${entry.message}`);
   }
 
   /**
@@ -620,6 +644,8 @@ export function apply(ctx, rawConfig = {}) {
     noteTts,
     noteStt,
     recentStt,
+    noteClientError,
+    clientErrors,
     describeConfig,
     updateConfig,
     prepareState,

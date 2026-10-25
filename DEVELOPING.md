@@ -159,7 +159,7 @@ $P    = "<本仓库同级>\probe"
 
 ### 供应商是数据，不是代码
 
-每个供应商自带 `kind`（由哪个适配器接管：`mimo` / `openai-speech` / `dev-tone`），
+每个供应商自带 `kind`（由哪个适配器接管：`mimo` / `openai-speech` / `siliconflow` / `dev-tone`），
 外加自己的地址、模型、音色、格式与凭据。新增供应商**不需要改适配器**。
 
 - `lib/tts.js` 的 `BUILTIN_PROVIDERS` 是内置表，`normalizeProviders(config)` 把它与
@@ -188,6 +188,52 @@ $P    = "<本仓库同级>\probe"
   不用重新注册（重新注册会撞上重名拒绝）。
 - 插件卸载时要 dispose 这个 section，否则段落会留在提示里。
 - 注册失败只降级、不抛出：`/state` 的 `personaApplied` / `personaReason` 会如实说明。
+
+### 克隆能力由 kind 决定，克隆协议各不相同
+
+**能不能克隆不是用户的开关**，是供应商类型的属性。`CLONE_CAPABLE_KINDS` 列出支持克隆的
+kind，`mergeProviderRecord` 与 `normalizeProviders` 都以它为准 —— 用户在表单里勾「支持
+克隆」，对不支持的类型一律不认。
+
+三家协议的差别是这段代码的全部难点：
+
+| kind | 参考音频怎么走 | 要不要参考文本 |
+|---|---|---|
+| `mimo` | 一次调用，参考音频作为 data URI 塞进 `audio.voice` | 不要（zero-shot） |
+| `siliconflow` | **两步**：先 `POST /uploads/audio/voice` 注册，拿到音色 uri，再用 uri 合成 | **要**，用来与音频对齐 |
+| `openai-speech` | 不支持克隆 | — |
+
+- **两步式克隆的音色 uri 必须缓存**（`cloneRegistry`）。注册一次就好；不缓存的话每合成
+  一句就重传一次参考音频，服务端的音色也会堆成一片。缓存键含样本字节数，参考音频换了
+  就会重新注册。
+- **参考文本早就存着了**：`lib/voices.js` 一直保存 `ref_text.txt`，当初是为了给 MiMo
+  之外的服务留着。硅基流动要的就是它。
+- 克隆请求要传给 `synthesize` 的是 `cloneRef`（名字、文本、字节数、data URI），
+  **`voice` 仍按原来的约定是 data URI 字符串**，别改这个形状。
+
+### 限流要退避，不要甩给用户
+
+合成服务在忙的时候会答 **429** 或 **503**，有时干脆不答、直到超时。原先这些都直接变成
+红色气泡，用户只看到 `Too many requests`，而同一句话晚点问一次通常是好的。
+
+`lib/tts.js` 的 `fetchWithBackoff` 统一处理：
+
+- **429 / 503** 退避重试最多三次，间隔 0.7s / 1.4s / 2.8s。
+- **超时**只再试一次（一次成功要等很久，重试三次只会让界面卡得更久），单次超时从
+  120 秒收紧到 **60 秒**。
+- **调用方自己的 abort 不重试** —— 那是「停下来」的意思，不是「等一等」。
+- 别的状态码（400、401 …）**不重试**：重试一个坏请求只是把同一个错误说三遍。
+
+最后仍然失败时，报 `rate-limited`（HTTP 429）并说清已经重试过几次。
+
+### 浏览器里的失败要能查
+
+客户端的 `console.error` 关掉窗口就没了，所以：
+
+- 客户端 catch 到朗读失败时，`POST /client-error` 上报给宿主；宿主记在 `clientErrors` 里，
+  `/state` 能读到。
+- `GET /ping` 报告宿主看到的调用方（Origin / Host / 地址 / 是否放行）。同机不同名
+  （`localhost` 与 `127.0.0.1`）现在不再误伤，来源对不上时会把差在哪讲清楚。
 
 ### 版本更新不架服务器
 

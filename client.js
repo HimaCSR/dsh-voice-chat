@@ -144,6 +144,27 @@ window.__ModuleLoader__.load({
         if (!response.ok) throw new Error((await asJson(response)).error ?? `STT HTTP ${response.status}`);
         return asJson(response);
       },
+      /**
+       * Ask the host what it sees of this page.
+       *
+       * A read-out that fails only in the browser is almost always the host
+       * refusing the request; asking it says why, in words.
+       */
+      async ping() {
+        return asJson(await fetch(`${BASE}/ping`));
+      },
+      /** Tell the host about a failure the console would otherwise swallow. */
+      async reportError(where, message, detail) {
+        try {
+          await fetch(`${BASE}/client-error`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ where, message, detail }),
+          });
+        } catch {
+          // Reporting is best-effort; the original failure still stands.
+        }
+      },
       /** Synthesize one sentence; resolves with the audio bytes. */
       async tts(text, voice, signal) {
         const response = await fetch(`${BASE}/tts`, {
@@ -152,7 +173,20 @@ window.__ModuleLoader__.load({
           body: JSON.stringify({ text, voice }),
           signal,
         });
-        if (!response.ok) throw new Error((await asJson(response)).error ?? `TTS HTTP ${response.status}`);
+        if (!response.ok) {
+          const body = await response.text();
+          let reason = `TTS HTTP ${response.status}`;
+          try {
+            const parsed = JSON.parse(body);
+            if (parsed?.error) reason = parsed.error;
+          } catch {
+            // Not JSON: the host answered with something else entirely.
+            reason = `TTS HTTP ${response.status}: ${body.slice(0, 200)}`;
+          }
+          const error = new Error(reason);
+          error.status = response.status;
+          throw error;
+        }
         return response.arrayBuffer();
       },
       /** Download the pinned local models; resolves when the run finishes. */
@@ -756,6 +790,8 @@ registerProcessor('voice-chat-mic', MicCapture);
       upload: '选择参考音频（wav/mp3，5~20 秒最稳）',
       voiceName: '音色名',
       refText: '参考音频说了什么（可选）',
+      refTextRequired: '参考音频说了什么（必填）',
+      refTextRequiredHint: '该服务靠这段文字与参考音频对齐，缺了它就无法克隆。',
       create: '创建',
       remove: '删除',
       sttBackend: '识别',
@@ -895,6 +931,8 @@ registerProcessor('voice-chat-mic', MicCapture);
       upload: 'Reference audio (wav/mp3, 5-20 s works best)',
       voiceName: 'Voice name',
       refText: 'What the reference says (optional)',
+      refTextRequired: 'What the reference says (required)',
+      refTextRequiredHint: 'This service matches the words against the sample; without them it cannot clone.',
       create: 'Create',
       remove: 'Delete',
       sttBackend: 'Recognition',
@@ -1564,6 +1602,18 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
 
       async function refreshState() {
         try {
+          // Ask the host whether it will serve this page at all. When it
+          // refuses, the reason is worth more than a bare failure.
+          try {
+            const caller = await api.ping?.();
+            if (caller && caller.allowed === false) {
+              setEngine({
+                error: `宿主拒绝了本页面的请求：${caller.reason ?? '来源不一致'}（页面来源 ${caller.origin ?? '未知'}）`,
+              });
+            }
+          } catch {
+            // The ping is a diagnostic; its failure is the state call's job.
+          }
           const state = await api.state();
           setEngine({
             ready: state.ready === true,
@@ -2777,6 +2827,12 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
           setError('请先选择参考音频');
           return;
         }
+        // The service matches the words against the sample, so a missing
+        // transcript is a failed clone waiting to happen.
+        if (cloneNeedsTranscript && refText.trim() === '') {
+          setError('请填写参考音频对应的文字，该服务靠它与音频对齐');
+          return;
+        }
         void withBusy('创建音色', async () => {
           const buffer = await file.arrayBuffer();
           const bytes = new Uint8Array(buffer);
@@ -2840,6 +2896,9 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
       const providerList = providers ?? engine.providers ?? [];
       const selectedProvider = providerList.find((entry) => entry.id === config.provider) ?? null;
       const cloneSupported = selectedProvider?.clone === true;
+      // Some services match the sample against its transcript, so for them
+      // the words are part of the clone and not a nicety.
+      const cloneNeedsTranscript = selectedProvider?.cloneNeedsTranscript === true;
 
       // Load the provider list and the dependency report the first time the
       // advanced tab is shown, so opening the sheet stays cheap.
@@ -3017,10 +3076,13 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
             h('div', { style: styles.row }, h('span', { style: styles.note }, t('upload'))),
             h('div', { style: styles.row }, h('input', {
               style: styles.field,
-              placeholder: t('refText'),
+              placeholder: cloneNeedsTranscript ? t('refTextRequired') : t('refText'),
               value: refText,
               onChange: (event) => setRefText(event.target.value),
             })),
+            cloneNeedsTranscript
+              ? h('div', { style: styles.note }, t('refTextRequiredHint'))
+              : null,
             h('div', { style: { margin: '8px 0 2px' } },
               h(Button, { className: 'dshv-primary', disabled: busy !== null, onClick: upload }, t('create'))))
           : h('div', { style: styles.section },
@@ -3544,7 +3606,11 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
               } catch (error) {
                 if (error?.name !== 'AbortError') {
                   console.error('[voice-chat] TTS failed:', error);
-                  setEngine({ error: `朗读失败：${error.message ?? error}` });
+                  const message = `朗读失败：${error.message ?? error}`;
+                  setEngine({ error: message });
+                  // The host keeps the trail: a failure that only ever shows
+                  // up in the browser would otherwise be gone with the tab.
+                  void client.reportError?.('tts', message, String(error?.stack ?? '').slice(0, 500));
                 }
               } finally {
                 if (engine.ttsController === controller) engine.ttsController = null;

@@ -139,19 +139,31 @@ dsh plugin --profile desktop add github:HimaCSR/dsh-voice-chat
 
 ### 也可以换成别的供应商
 
-设置面板的**高级设置**页里有供应商下拉与配置表单，可以自己加。内置两个**已验证可用的免费参考配置**，点一下即填入表单，剩下的只要补上自己的 Key：
+设置面板的**高级设置**页里有供应商下拉与配置表单，可以自己加。内置的**硅基流动 SiliconFlow** 是已验证可用的参考配置，点一下即填入表单，剩下的只要补上自己的 Key：
 
-| 参考配置 | 地址 | 模型 | Key 从哪来 |
-|---|---|---|---|
-| **OpenRouter** | `https://openrouter.ai/api/v1` | `fish-audio/s2.1-pro-free:free` | [openrouter.ai](https://openrouter.ai/) 注册后取 |
-| **硅基流动 SiliconFlow** | `https://api.siliconflow.cn/v1` | `FunAudioLLM/CosyVoice2-0.5B` | [siliconflow.cn](https://siliconflow.cn/) 注册后取 |
+| 参考配置 | 地址 | 模型 | Key 从哪来 | 克隆 |
+|---|---|---|---|---|
+| **硅基流动 SiliconFlow** | `https://api.siliconflow.cn/v1` | `FunAudioLLM/CosyVoice2-0.5B` | [siliconflow.cn](https://siliconflow.cn/) 注册后取 | 支持 |
 
-表单里要填的东西：名称、接口格式（`mimo` 走 chat/completions，`openai-speech` 走 `/audio/speech`）、地址、模型、音色、音频格式、API Key 或环境变量名，以及「是否支持声音克隆」。
+> OpenRouter 曾是内置参考配置之一，已移除：它的免费档不路由到支持克隆的端点，推荐它等于许诺做不到的事。适配代码仍在，需要的用户可以自行添加。
+
+表单里要填的东西：名称、接口格式（`mimo` 走 chat/completions，`openai-speech` 走 `/audio/speech`，`siliconflow` 走 `/audio/speech` 并多一步音色注册）、地址、模型、音色、音频格式、API Key 或环境变量名。
 
 两点要留意：
 
-- **格式不能乱填**。OpenRouter 只收 `mp3` 与 `pcm`，填 `wav` 会被它拒掉。填 `pcm` 时插件会自己包成 WAV 容器。
-- **克隆能力是供应商的属性**。给不支持克隆的供应商发克隆请求会明确报 `clone-unsupported`，而不是悄悄按普通音色合成。
+- **格式不能乱填**。有些服务只收 `mp3` 与 `pcm`，填 `wav` 会被拒掉。填 `pcm` 时插件会自己包成 WAV 容器。
+- **克隆能力是供应商的属性**，由接口格式决定，不能随手勾上。给不支持克隆的供应商发克隆请求会明确报 `clone-unsupported`，而不是悄悄按普通音色合成。
+
+### 声音克隆：两家都能克隆，流程不同
+
+| 供应商 | 怎么克隆 | 参考音频的文字 |
+|---|---|---|
+| **小米 MiMo** | 一次调用，参考音频作为 data URI 随请求发过去 | 不需要（zero-shot） |
+| **硅基流动 SiliconFlow** | 两步：先把参考音频注册成音色，拿到音色 id，再用 id 合成 | **需要**，用它与音频对齐 |
+
+硅基流动的音色 id 会被缓存下来，注册一次就好；参考音频换了才会重新注册。音色库里本来就存着参考音频对应的文字（`ref_text.txt`），硅基流动下设置页会把它标成必填。
+
+克隆请求是幂等的，**限流与超时都会自动退避重试**：429 / 503 最多重试三次（间隔 0.7s / 1.4s / 2.8s），超时再试一次。
 
 自己加的供应商存在 `tts.providers` 里（见第 8 节），删除走 `DELETE /providers?id=`；内置的删不掉。
 
@@ -469,7 +481,7 @@ dsh-voice-chat/
 
 | 套件 | 结果 |
 |---|---|
-| 单元测试 | 50 / 50（含"浏览器半区 `apply()` 能跑通并注册两个 seat"、胶球几何、供应商归一化、版本比较、依赖区间判断、人设段落命名与重名拒绝、跨供应商 Key 隔离、pnpm 布局覆盖） |
+| 单元测试 | 62 / 62（含"浏览器半区 `apply()` 能跑通并注册两个 seat"、胶球几何、供应商归一化、版本比较、依赖区间判断、人设段落命名与重名拒绝、跨供应商 Key 隔离、pnpm 布局覆盖、限流退避与超时重试、硅基流动两步克隆与音色 id 缓存） |
 | HTTP 契约 | 22 / 22 |
 | Bundle 清单 / patch 静态校验 | 一致 |
 | FireRedVAD 数值闸门 | PASS（语音均值 0.709 / 覆盖率 86.3%，噪声与静音均 0 段） |
