@@ -108,11 +108,11 @@ $P    = "<本仓库同级>\probe"
 
 | 脚本（在 `probe/verify/`） | 运行时 | 覆盖 | 期望 |
 |---|---|---|---|
-| `unit-tests.mjs` | 普通 node | CMVN 夹具、fbank、WAV 往返、端点状态机、TTS 请求形状、**客户端 `apply()` 注册 seat**、**胶球几何** | 18/18 |
-| `http-tests.mjs` | 普通 node | 真实回环服务器：越权、状态码、克隆计划、dev-tone | 12/12 |
+| `unit-tests.mjs` | 普通 node | CMVN 夹具、fbank、WAV 往返、端点状态机、TTS 请求形状、**客户端 `apply()` 注册 seat**、**胶球几何**、供应商归一化、版本比较、依赖区间 | 36/36 |
+| `http-tests.mjs` | 普通 node | 真实回环服务器：越权、状态码、克隆计划、dev-tone、供应商增删查、依赖审查、版本检查 | 22/22 |
 | `manifest-check.mjs` | **Electron-as-node**（要 DSH 里的 js-yaml） | 清单/patch/相对 import 一致性 | `consistent` |
 | `worker-e2e.mjs` | **Electron-as-node**（sherpa 在 app.asar 里） | 真模型转写 + 噪声/静音拒识 + **降级路径** | 7/7 |
-| `live-verify.mjs` | **Electron-as-node** | 打运行中的 GUI，14 项含真 MiMo 合成 | 14/14 |
+| `live-verify.mjs` | **Electron-as-node** | 打运行中的 GUI，18 项含真 MiMo 合成 | 18/18 |
 | `firered-spike.mjs` | 普通 node + `$env:DSH_VOICE_MODULE_DIR=<profile>` | FireRedVAD 数值闸门（语音 vs 噪声 vs 静音） | PASS |
 | `vad-backends.mjs` | **Electron-as-node** | 子进程逐个验 ten/silero 是否可用——sherpa 模型不对时会 `exit(-1)`，只能靠子进程观察 | 见输出 |
 
@@ -155,7 +155,52 @@ $P    = "<本仓库同级>\probe"
 
 ---
 
-## 5. 用到的 DSH API（照抄即可）
+## 5. 1.1.0 新增的机制（改这块时先读这段）
+
+### 供应商是数据，不是代码
+
+每个供应商自带 `kind`（由哪个适配器接管：`mimo` / `openai-speech` / `dev-tone`），
+外加自己的地址、模型、音色、格式与凭据。新增供应商**不需要改适配器**。
+
+- `lib/tts.js` 的 `BUILTIN_PROVIDERS` 是内置表，`normalizeProviders(config)` 把它与
+  `config.tts.providers` 合并，**并把旧的扁平字段（`tts.baseUrl` / `tts.model` / `tts.apiKey` …）
+  归一化进当前选中的供应商**。磁盘上的原字段不动，所以旧配置照常能读。
+- **别再用「值为空才填」的写法做迁移**：内置供应商自带默认地址，用户写在扁平字段里的值会被默认值
+  盖掉。归一化时要区分「内置默认值」与「用户配置过的值」——`normalizeProviders` 里的
+  `configured` 表就是干这个的。
+- `/state` 与 `/providers` **绝不返回明文 Key**，只有 `hasKey` 与 `keySource`。改这两处时
+  记得跑 `http-tests.mjs` 里那两条专门盯这件事的用例。
+
+### 人物设定走 systemPrompt，不走 session.prompt
+
+`session.prompt` 的 content schema 只允许 `text` / `image` / `file`，**没有 system 角色**。
+所以人设走 `ctx.get('systemPrompt').section({ name, order, text })`：
+
+- 段落名固定为 `deployment:persona-suffix`（**同名即替换**，不是追加），所以改人设不用重启。
+- `order` 取 `systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_SUFFIX')`（当前是 10200）。
+- 插件卸载时要 dispose 这个 section，否则段落会留在提示里。
+
+### 版本更新不架服务器
+
+直接问 GitHub Releases API，失败回落到 `gh-proxy.com` 镜像，**两个源都实测 200**。
+匿名调 GitHub 只有 **60 次/小时**，所以结果按小时缓存（`UpdateChecker`），而且每次请求都带超时。
+取不到就如实说取不到，**不猜版本号**。
+
+### 依赖审查与安装：别用 `pluginManager.installBundle`
+
+它只接受 bundle：`manifest?.dsh?.bundle === undefined` 会抛 `not-bundle`，而且**会回滚**
+`package.json` 与 `pnpm-lock.yaml`。装普通依赖要直接调 DSH 自带的 pnpm：
+
+```
+<DSH_HOME>\dsh-runtimes\dsh-primary-runtime\dependencies\pnpm\bin\pnpm.cjs
+```
+
+（`pnpm` **不在 PATH** 上。）装到当前 profile 目录，用 `process.execPath` 起进程、
+`ELECTRON_RUN_AS_NODE=1`，参考 `lib/stt.js` 起 worker 的写法。
+
+---
+
+## 6. 用到的 DSH API（照抄即可）
 
 ```js
 // Host 半区（index.js）
@@ -192,7 +237,7 @@ return { inject: ['slots', 'locale', 'sessions'], apply(ctx) {
 
 ---
 
-## 6. 七条不能破的不变式（细节见 README）
+## 7. 七条不能破的不变式（细节见 README）
 
 1. **fbank 样本必须先乘 32768** —— Kaldi 前端按 int16 幅度域标定，否则所有 log-mel 下移 `ln(32768²)`，模型对所有输入判"不是语音"。
 2. **必须比 sherpa 先加载 `onnxruntime-node`** —— 两者都带 `onnxruntime.dll`，Windows 按文件名绑定已加载的同名库，顺序反了就是 `ERR_DLOPEN_FAILED`。
@@ -204,7 +249,7 @@ return { inject: ['slots', 'locale', 'sessions'], apply(ctx) {
 
 ---
 
-## 7. 已知缺口 / 下一步可做
+## 8. 已知缺口 / 下一步可做
 
 - **400 ms 预滚修复尚未在你浏览器里生效**（要刷新页面）。它解决的是：打断时"确认开口"需 220 ms，之前的实现从确认那一刻才开始录音，导致打断那句话**第一个字被切掉**（实测文本里出现过 `妈听。`、`阿西得`）。
 - **生僻专有名词识别不准**：`纳西妲` → `阿西得`。SenseVoice 词表里没有这个词。可选方案：同音替换后处理 / 换支持热词偏置的识别模型 / 改称呼。

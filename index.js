@@ -16,6 +16,10 @@ import { inspectAssets, prepareAssets, resolveAssets } from './lib/assets.js';
 import { SttService } from './lib/stt.js';
 import { createVoiceRoutes } from './lib/routes.js';
 import { anchorList, probeModule, setModuleAnchors } from './lib/sherpa.js';
+import { BUILTIN_PROVIDERS, normalizeProviders, resolveProvider } from './lib/tts.js';
+import { UpdateChecker, readPluginVersion } from './lib/version.js';
+import { applyPersona } from './lib/persona.js';
+import { auditDependencies, installDependency, readManifest } from './lib/deps.js';
 
 /** Services the Host half needs before it may register anything. */
 export const inject = ['webServer'];
@@ -66,6 +70,16 @@ const DEFAULTS = {
     timeoutMs: 120000,
     apiKey: null,
     apiKeyEnv: 'MIMO_API_KEY',
+    // The conversation persona, injected into the harness system prompt. It
+    // shapes what the assistant says — not how the voice sounds.
+    persona: '',
+    // Custom provider records, keyed by provider id.
+    providers: {},
+  },
+  // Update checking. `manifestUrl` overrides the default GitHub Releases
+  // lookup, which is what a self-hosted mirror would use.
+  update: {
+    manifestUrl: '',
   },
 };
 
@@ -81,6 +95,21 @@ const MUTABLE = {
   instruction: 'tts.instruction',
   language: 'stt.language',
   vadBackend: 'stt.vadBackend',
+  // The conversation persona, injected into the harness system prompt.
+  persona: 'tts.persona',
+  // A custom update source; empty means the default GitHub Releases lookup.
+  updateUrl: 'update.manifestUrl',
+};
+
+/**
+ * Keys whose value is a plain object rather than a string.
+ *
+ * Everything else stays a string or null, which keeps the persisted file
+ * readable and stops a stray number from being written where a label is
+ * expected.
+ */
+const MUTABLE_OBJECTS = {
+  providers: 'tts.providers',
 };
 
 /** Deep-merge plain objects; arrays and scalars from `source` win. */
@@ -149,6 +178,41 @@ export function apply(ctx, rawConfig = {}) {
   const recent = [];
   /** Recent recognitions: time, audio length, speech length and transcript. */
   const recentStt = [];
+  /** The plugin's own version, read once at start-up. */
+  let pluginVersion = null;
+  /** The dispose handle of the registered persona prompt section. */
+  let personaDispose = null;
+  /** The most recent dependency audit, refreshed on demand. */
+  let depsReport = null;
+  /** The state of the running dependency installation, if any. */
+  let depsInstall = null;
+  /** The update checker, holding the cached release lookup. */
+  const updateChecker = new UpdateChecker({ manifestUrl: config.update?.manifestUrl ?? '' });
+
+  /**
+   * Register the conversation persona as a system prompt section.
+   *
+   * The persona is replaced rather than appended to, so changing it takes
+   * effect without a restart.
+   */
+  function onPersonaChanged(persona) {
+    if (personaDispose) {
+      try {
+        personaDispose();
+      } catch {
+        // The section is already gone.
+      }
+      personaDispose = null;
+    }
+    const result = applyPersona(ctx, persona);
+    if (result.applied) {
+      personaDispose = result.dispose;
+      log('conversation persona registered');
+    } else {
+      log(`conversation persona not applied: ${result.reason}`);
+    }
+    return result;
+  }
 
   const ready = readJson(overridesPath, {}).then(async (stored) => {
     if (stored && typeof stored === 'object') {
@@ -156,9 +220,14 @@ export function apply(ctx, rawConfig = {}) {
       for (const [key, dotted] of Object.entries(MUTABLE)) {
         if (stored[key] !== undefined) setPath(config, dotted, stored[key]);
       }
+      for (const [key, dotted] of Object.entries(MUTABLE_OBJECTS)) {
+        if (stored[key] !== undefined) setPath(config, dotted, stored[key]);
+      }
       log('restored runtime overrides');
     }
     assets = await inspectAssets(config, { verify: false }).catch(() => null);
+    pluginVersion = await readPluginVersion();
+    if (config.tts.persona) onPersonaChanged(config.tts.persona);
     return assets;
   });
 
@@ -172,18 +241,21 @@ export function apply(ctx, rawConfig = {}) {
 
   /** Snapshot of the settings the UI may display. */
   function describeConfig() {
+    const { providers, currentId } = normalizeProviders(config);
+    const selected = providers[currentId] ?? null;
     return {
-      provider: config.tts.provider,
-      model: config.tts.model,
-      cloneModel: config.tts.cloneModel,
-      baseUrl: config.tts.baseUrl,
+      provider: currentId,
+      model: selected?.model ?? config.tts.model,
+      cloneModel: selected?.cloneModel ?? config.tts.cloneModel,
+      baseUrl: selected?.baseUrl ?? config.tts.baseUrl,
       voice: config.tts.voice,
-      format: config.tts.format,
+      format: selected?.format ?? config.tts.format,
       hasKey: typeof config.tts.apiKey === 'string' && config.tts.apiKey.length > 0
         ? true
         : Boolean(process.env[config.tts.apiKeyEnv] || process.env.MIMO_API_KEY),
       keySource: typeof config.tts.apiKey === 'string' && config.tts.apiKey.length > 0 ? 'settings' : 'environment',
       language: config.stt.language,
+      persona: config.tts.persona ?? '',
       sttBackend: 'sensevoice-small',
       precision: config.stt.precision,
       vadBackend: assets?.vad?.backend ?? config.stt.vadBackend,
@@ -191,8 +263,79 @@ export function apply(ctx, rawConfig = {}) {
       vadNote: stt.status().engine?.vadNote ?? null,
       modelReady: assets?.ready === true,
       dataRoot: config.dataRoot,
+      version: pluginVersion,
       recent,
     };
+  }
+
+  /**
+   * The provider list for the settings UI.
+   *
+   * A stored API key never leaves the Host: each entry reports whether a key
+   * exists and where it came from, never the key itself.
+   */
+  function describeProviders() {
+    const { providers, currentId } = normalizeProviders(config);
+    return Object.values(providers).map((record) => {
+      const hasStoredKey = typeof record.apiKey === 'string' && record.apiKey.length > 0;
+      const hasEnvKey = Boolean(record.apiKeyEnv && process.env[record.apiKeyEnv]);
+      return {
+        id: record.id,
+        label: record.label || record.id,
+        kind: record.kind ?? 'mimo',
+        clone: record.clone === true,
+        builtin: record.builtin === true,
+        reference: record.reference === true,
+        hint: record.hint ?? null,
+        baseUrl: record.baseUrl ?? '',
+        model: record.model ?? '',
+        cloneModel: record.cloneModel ?? '',
+        voice: record.voice ?? '',
+        format: record.format ?? 'wav',
+        apiKeyEnv: record.apiKeyEnv ?? '',
+        hasKey: hasStoredKey || hasEnvKey,
+        keySource: hasStoredKey ? 'settings' : hasEnvKey ? 'environment' : 'none',
+        selected: record.id === currentId,
+      };
+    });
+  }
+
+  /**
+   * Add, change or remove a provider.
+   *
+   * A built-in provider can be re-pointed but not deleted: it is the fallback
+   * the plugin falls back to when a custom one fails.
+   * @param action - `'upsert'` or `'delete'`.
+   * @param record - the provider id, plus the fields to write.
+   */
+  async function updateProvider(action, record) {
+    const id = typeof record?.id === 'string' ? record.id.trim() : '';
+    if (id === '') throw new Error('缺少供应商 id');
+    const { providers, currentId } = normalizeProviders(config);
+    const existing = providers[id] ?? null;
+    if (action === 'delete') {
+      if (existing?.builtin) throw new Error(`内置供应商「${existing.label ?? id}」不能删除`);
+      const next = { ...(config.tts.providers ?? {}) };
+      delete next[id];
+      await updateConfig({ providers: next });
+      if (currentId === id) await updateConfig({ provider: 'mimo' });
+      log(`provider removed: ${id}`);
+      return describeProviders();
+    }
+    const kind = record.kind ?? existing?.kind ?? 'openai-speech';
+    if (!['mimo', 'openai-speech', 'dev-tone'].includes(kind)) {
+      throw new Error(`不支持的供应商类型：${kind}`);
+    }
+    const builtin = BUILTIN_PROVIDERS.find((entry) => entry.id === id) ?? null;
+    const next = { ...(config.tts.providers ?? {}) };
+    const merged = { ...(existing ?? builtin ?? {}), ...record, id, kind };
+    // A blank key field clears the stored key instead of storing an empty one.
+    if (typeof merged.apiKey === 'string' && merged.apiKey.trim() === '') merged.apiKey = null;
+    else if (typeof merged.apiKey === 'string') merged.apiKey = merged.apiKey.trim();
+    next[id] = merged;
+    await updateConfig({ providers: next });
+    log(`provider saved: ${id}`);
+    return describeProviders();
   }
 
   /** The voice the UI should use when it does not send one explicitly. */
@@ -232,15 +375,117 @@ export function apply(ctx, rawConfig = {}) {
       next[key] = value;
       setPath(config, dotted, value);
     }
+    for (const [key, dotted] of Object.entries(MUTABLE_OBJECTS)) {
+      if (patch[key] === undefined) continue;
+      const value = patch[key];
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) continue;
+      next[key] = value;
+      setPath(config, dotted, value);
+    }
     overrides = { ...overrides, ...next };
     await writeJsonAtomic(overridesPath, overrides);
     if (next.voice !== undefined) log(`default voice set to ${String(next.voice)}`);
+    if (next.provider !== undefined) log(`tts provider set to ${String(next.provider)}`);
+    if (next.persona !== undefined) onPersonaChanged(String(next.persona ?? ''));
     return describeConfig();
   }
 
   /** Current background-preparation state. */
   function prepareState() {
     return { ...prepare };
+  }
+
+  /**
+   * Audit the native modules the plugin relies on.
+   *
+   * The report merges the dependency view with the diagnostics already
+   * collected, so one section answers both "what is broken?" and "how do I
+   * fix it?".
+   */
+  async function dependencyReport() {
+    const manifest = await readManifest().catch(() => ({}));
+    const entries = await auditDependencies(manifest);
+    depsReport = { entries, at: Date.now() };
+    return depsReport;
+  }
+
+  /** The cached dependency report, computed on first use. */
+  async function describeDependencies() {
+    return depsReport ?? dependencyReport();
+  }
+
+  /**
+   * Start installing one dependency into the profile.
+   *
+   * The installation is a background job: it reports its output through the
+   * state endpoint rather than holding the request open.
+   */
+  function startDependencyInstall(name, range) {
+    if (depsInstall?.running) throw new Error('已有依赖正在安装');
+    if (typeof name !== 'string' || !/^[a-z0-9@._/-]+$/i.test(name)) {
+      throw new Error('依赖名不合法');
+    }
+    const manifest = null;
+    void manifest;
+    depsInstall = installDependency({
+      name,
+      range: typeof range === 'string' ? range.trim() : '',
+      profileDir: profile?.dir ?? '',
+      onState: (state) => {
+        depsInstall = state;
+      },
+    });
+    return { ...depsInstall };
+  }
+
+  /** The state of the running dependency installation. */
+  function dependencyInstallState() {
+    return depsInstall ? { ...depsInstall } : { running: false, phase: 'idle', output: [], error: null };
+  }
+
+  /**
+   * Check whether a newer release exists.
+   *
+   * The lookup needs no server of our own: it asks GitHub's public releases
+   * API and falls back to a mirror.
+   */
+  async function checkForUpdate() {
+    const current = pluginVersion ?? (await readPluginVersion());
+    pluginVersion = current;
+    return updateChecker.check(current);
+  }
+
+  /**
+   * Install a released version through the DSH plugin manager.
+   *
+   * The plugin is installed with `link:` on a development machine, so
+   * unpacking the release archive over it would destroy the working copy.
+   * The plugin manager is the supported way to put a published version in
+   * place: it runs pnpm in the profile and leaves the profile consistent.
+   * @param spec - the install spec, e.g. `github:HimaCSR/dsh-voice-chat@v1.1.0`.
+   * @param signal - an abort signal, as the service requires.
+   */
+  async function installRelease(spec, signal) {
+    const manager = ctx.get('pluginManager');
+    if (!manager || typeof manager.installBundle !== 'function') {
+      return {
+        applied: false,
+        error: '当前运行时没有插件管理服务，无法自动安装',
+        manual: `dsh plugin --profile desktop add ${spec}`,
+      };
+    }
+    try {
+      const result = await manager.installBundle(spec, { enabled: true, signal });
+      log(`update install finished: ${JSON.stringify(result?.application ?? result)}`);
+      return result;
+    } catch (error) {
+      warn(`update install failed: ${error.message}`);
+      return {
+        applied: false,
+        error: error.message,
+        manual: `dsh plugin --profile desktop add ${spec}`,
+      };
+    }
   }
 
   /** Start the one-shot model download if it is not already running. */
@@ -275,6 +520,13 @@ export function apply(ctx, rawConfig = {}) {
     updateConfig,
     prepareState,
     startPrepare,
+    describeProviders,
+    updateProvider,
+    describeDependencies,
+    startDependencyInstall,
+    dependencyInstallState,
+    checkForUpdate,
+    installRelease,
   });
 
   ctx.effect(() => {
@@ -289,6 +541,18 @@ export function apply(ctx, rawConfig = {}) {
   ctx.effect(() => () => {
     stt.dispose();
   }, 'voice-chat: recognizer worker');
+
+  // The persona section lives as long as the plugin does.
+  ctx.effect(() => () => {
+    if (personaDispose) {
+      try {
+        personaDispose();
+      } catch {
+        // Already gone.
+      }
+      personaDispose = null;
+    }
+  }, 'voice-chat: persona prompt section');
 
   // Cache readiness (and kick off nothing) so `/state` can answer immediately.
   void ready.then((report) => {

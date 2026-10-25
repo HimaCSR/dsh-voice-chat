@@ -29,7 +29,47 @@ window.__ModuleLoader__.load({
       voice: 'dsh.voice.voice',
       language: 'dsh.voice.language',
       pos: 'dsh.voice.pos',
+      // The two microphone thresholds, kept as the same 0-100 numbers the
+      // sliders show, so the stored value is readable on its own.
+      sensitivity: 'dsh.voice.sensitivity',
+      minRms: 'dsh.voice.minRms',
     };
+
+    /**
+     * The slider ranges, and the thresholds they stand for.
+     *
+     * The defaults are the values the plugin has always used, so a user who
+     * never touches a slider keeps the behaviour they know. A larger
+     * threshold means a louder voice is needed, which is why both sliders
+     * read as "how sensitive" rather than "how strict".
+     */
+    const SENSITIVITY = {
+      interrupt: { min: 0.012, max: 0.060, default: 0.035 },
+      minRms: { min: 0.002, max: 0.020, default: 0.005 },
+    };
+
+    /** Map a 0-100 slider position onto a threshold. */
+    function sliderToThreshold(range, position) {
+      const value = Math.min(100, Math.max(0, Number(position) || 0));
+      return range.min + (range.max - range.min) * (value / 100);
+    }
+
+    /** Map a threshold back onto the 0-100 slider position. */
+    function thresholdToSlider(range, threshold) {
+      const value = Number(threshold);
+      if (!Number.isFinite(value)) return 50;
+      const ratio = (value - range.min) / (range.max - range.min);
+      return Math.round(Math.min(100, Math.max(0, ratio * 100)));
+    }
+
+    /** Read a stored slider position, falling back to the default threshold. */
+    function readSlider(key, range) {
+      const stored = readString(STORAGE[key], '');
+      if (stored === '') return thresholdToSlider(range, range.default);
+      const value = Number.parseInt(stored, 10);
+      if (!Number.isFinite(value)) return thresholdToSlider(range, range.default);
+      return Math.min(100, Math.max(0, value));
+    }
 
     // ─────────────────────────────────────────────────────────────── settings
 
@@ -134,6 +174,58 @@ window.__ModuleLoader__.load({
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(patch),
+        });
+        if (!response.ok) throw new Error((await asJson(response)).error ?? `HTTP ${response.status}`);
+        return asJson(response);
+      },
+      /** The full provider list, each entry without its API key. */
+      async providers() {
+        return asJson(await fetch(`${BASE}/providers`));
+      },
+      /** Create or change one provider. */
+      async saveProvider(record) {
+        const response = await fetch(`${BASE}/providers`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(record),
+        });
+        if (!response.ok) throw new Error((await asJson(response)).error ?? `HTTP ${response.status}`);
+        return asJson(response);
+      },
+      /** Remove a custom provider. */
+      async deleteProvider(id) {
+        const response = await fetch(`${BASE}/providers?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
+        if (!response.ok) throw new Error((await asJson(response)).error ?? `HTTP ${response.status}`);
+        return asJson(response);
+      },
+      /** The dependency audit: what is installed, from where, at which version. */
+      async dependencies() {
+        return asJson(await fetch(`${BASE}/deps`));
+      },
+      /** Start installing one dependency into the DSH profile. */
+      async installDependency(name, range) {
+        const response = await fetch(`${BASE}/deps/install`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name, range }),
+        });
+        if (!response.ok) throw new Error((await asJson(response)).error ?? `HTTP ${response.status}`);
+        return asJson(response);
+      },
+      /** The progress of the running dependency installation. */
+      async dependencyInstallStatus() {
+        return asJson(await fetch(`${BASE}/deps/install/status`));
+      },
+      /** The newest published release, compared with the running version. */
+      async version() {
+        return asJson(await fetch(`${BASE}/version`));
+      },
+      /** Install a published release through the DSH plugin manager. */
+      async installVersion(spec) {
+        const response = await fetch(`${BASE}/version/install`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ spec }),
         });
         if (!response.ok) throw new Error((await asJson(response)).error ?? `HTTP ${response.status}`);
         return asJson(response);
@@ -492,11 +584,11 @@ registerProcessor('voice-chat-mic', MicCapture);
         if (this.released || this.paused) return;
         this.lastRms = rms;
         if (this.interruptMode) {
-          const interruptAt = this.options.interruptThreshold ?? 0.06;
+          const interruptAt = this.options.interruptThreshold;
           const now = performance.now();
           if (rms >= interruptAt) {
             if (this.armedAt === 0) this.armedAt = now;
-            else if (now - this.armedAt >= (this.options.interruptHoldMs ?? 220)) {
+            else if (now - this.armedAt >= this.options.interruptHoldMs) {
               this.armedAt = 0;
               this.interruptMode = false;
               // Keep the audio that tripped the barge-in. Discarding it clips
@@ -516,7 +608,7 @@ registerProcessor('voice-chat-mic', MicCapture);
           }
           return;
         }
-        const threshold = this.options.rmsThreshold ?? 0.012;
+        const threshold = this.options.rmsThreshold;
         if (rms >= threshold) {
           this.lastVoiceAt = performance.now();
           if (!this.speaking) {
@@ -672,6 +764,98 @@ registerProcessor('voice-chat-mic', MicCapture);
       lang_yue: '粤语',
       lang_ja: '日语',
       lang_ko: '韩语',
+      // ── settings tabs ──────────────────────────────────────────────────────
+      tabVoices: '音色偏好',
+      tabPersona: '人物设定',
+      tabAdvanced: '高级设置',
+      // ── voice preferences ──────────────────────────────────────────────────
+      voicePrefs: '音色偏好',
+      cloneVoice: '克隆音色',
+      cloneVoiceHint: '克隆音色需要所选服务支持声音克隆；不支持的服务不能创建克隆音色。',
+      noCloneSupport: '当前服务不支持声音克隆',
+      sampleVoice: '试听',
+      defaultVoice: '默认音色',
+      // ── persona ────────────────────────────────────────────────────────────
+      personaTitle: '对话人设',
+      personaHint: '决定助手「怎么讲话、讲什么内容」。例如：用户问一句答一句；回答较长时先给一句总结。这是给对话模型的指示，不影响音色。',
+      personaPlaceholder: '例如：这是语音对话，用户问一句你答一句；回答内容较多时，先用一两句话讲清要点，再补一句「你可以看看我总结的内容」。',
+      personaApplied: '人设已生效',
+      personaNotApplied: '人设未生效',
+      ttsStyleTitle: '朗读语气',
+      ttsStyleHint: '决定声音「怎么念」。这段文字会作为指令发给 TTS 服务，对克隆音色同样有效。建议按「角色 / 场景 / 指导」三段来写。',
+      ttsStylePlaceholder: '例如：\n角色：耐心的技术顾问，语气沉稳。\n场景：向同事解释一个复杂问题。\n指导：语速偏慢，句末略作停顿，重点词稍作强调。',
+      ttsStyleTags: '预置音色还可以直接在文本里加 (开心)、(温柔)、(东北话) 这类标签；克隆音色建议用上面的自然语言描述。',
+      // ── advanced ───────────────────────────────────────────────────────────
+      advancedTitle: '高级设置',
+      providerSection: 'TTS 服务',
+      providerHint: '选择朗读用的服务。可添加自定义服务，只要它使用 MiMo 或 OpenAI 兼容的接口格式。',
+      addProvider: '添加服务',
+      editProvider: '修改服务',
+      providerId: '服务标识',
+      providerIdHint: '只能用小写字母、数字和短横线；创建后不可更改。',
+      providerLabel: '显示名称',
+      providerBaseUrl: '接口地址',
+      providerModel: '模型',
+      providerVoice: '音色',
+      providerFormat: '返回格式',
+      providerApiKey: 'API Key',
+      providerApiKeyEnv: '环境变量名',
+      providerClone: '支持声音克隆',
+      providerDelete: '删除',
+      providerDeleteBuiltin: '内置服务不能删除',
+      providerSaved: '已保存',
+      providerDeleted: '已删除',
+      providerKind: '接口格式',
+      kind_mimo: 'MiMo（chat/completions）',
+      kind_openaispeech: 'OpenAI 兼容（/audio/speech）',
+      kind_devtone: '本地测试音',
+      referenceProviders: '参考配置',
+      referenceHint: '下面两项是已验证可用的免费参考配置，点一下即可填入表单。',
+      sensitivityTitle: '麦克风灵敏度',
+      interruptSensitivity: '打断灵敏度',
+      interruptSensitivityHint: '调高后需要更大的声音才会打断正在朗读的回复。好处是环境噪声不再误触发；代价是轻声插话可能打断不了。',
+      minRms: '最小音量',
+      minRmsHint: '调高后只有更响的声音才会被当成「开始说话」。好处是安静环境更稳；代价是说话太轻时整句可能被丢掉。',
+      sensitivityValue: '实际阈值',
+      sensitivityEffect: '下次说话生效',
+      // ── diagnostics and dependencies ───────────────────────────────────────
+      diagSection: '诊断与依赖',
+      dependencyName: '依赖',
+      dependencyStatus: '状态',
+      dependencySource: '来源',
+      dependencyVersion: '版本',
+      dependencyRequired: '要求',
+      depOk: '已安装',
+      depMissing: '未安装',
+      depMismatch: '版本不符',
+      depProvided: '由 DSH 提供',
+      depInstall: '安装',
+      depInstalling: '安装中…',
+      depInstalled: '安装完成，请重启 DSH 后生效',
+      depInstallFailed: '安装失败',
+      depRestartHint: '依赖装进 DSH 的 profile 后需要重启 DSH 才能生效。',
+      depOptionalHint: 'onnxruntime-node 只影响断句检测（FireRedVAD）；缺少它会自动改用别的断句方式，识别和朗读仍然可用。',
+      copyDiag: '复制诊断信息',
+      // ── version update ─────────────────────────────────────────────────────
+      versionSection: '版本更新',
+      currentVersion: '当前版本',
+      latestVersion: '最新版本',
+      checkUpdate: '检查更新',
+      checking: '检查中…',
+      upToDate: '已是最新版本',
+      updateAvailable: '有新版本可用',
+      updateNow: '立即更新',
+      updateConfirm: '更新将通过 pnpm 重新安装到 DSH 的 profile，并可能需要重启 DSH。继续吗？',
+      updateInstalling: '正在安装…',
+      updateDone: '更新完成，请重启 DSH',
+      updateFailed: '更新失败',
+      updateUnreachable: '无法连接版本检查服务，请检查网络后重试',
+      updateManual: '手动安装命令',
+      updateNoServer: '版本检查直接读取 GitHub 公开 Release，不需要额外服务器。',
+      // ── model preparation ──────────────────────────────────────────────────
+      modelPrepTitle: '模型准备',
+      modelPrepHint: '模型准备下载的是本地识别模型（SenseVoice + 断句检测），完全离线、不需要 Key。它让插件能听懂你说话；TTS 服务配置则负责把回复念出来，两者是独立的。',
+      preparingModel: '正在准备模型…',
     };
 
     const en = {
@@ -718,6 +902,98 @@ registerProcessor('voice-chat-mic', MicCapture);
       lang_yue: 'Cantonese',
       lang_ja: 'Japanese',
       lang_ko: 'Korean',
+      // ── settings tabs ──────────────────────────────────────────────────────
+      tabVoices: 'Voice',
+      tabPersona: 'Persona',
+      tabAdvanced: 'Advanced',
+      // ── voice preferences ──────────────────────────────────────────────────
+      voicePrefs: 'Voice preferences',
+      cloneVoice: 'Cloned voice',
+      cloneVoiceHint: 'Cloning needs a provider that supports it; a provider without clone support cannot create one.',
+      noCloneSupport: 'This provider does not support voice cloning',
+      sampleVoice: 'Play',
+      defaultVoice: 'Default voice',
+      // ── persona ────────────────────────────────────────────────────────────
+      personaTitle: 'Conversation persona',
+      personaHint: 'Decides how the assistant talks and what it says — one answer per question, and a short summary when the answer would be long. It instructs the chat model; it does not change the voice.',
+      personaPlaceholder: 'For example: this is a spoken conversation, answer one question at a time; when the answer is long, lead with a one or two sentence summary and add a line like "here is my summary".',
+      personaApplied: 'Persona is in effect',
+      personaNotApplied: 'Persona is not in effect',
+      ttsStyleTitle: 'Speaking style',
+      ttsStyleHint: 'Decides how the voice reads. This text is sent to the TTS service as an instruction and works for cloned voices too. Writing it as role / scene / direction tends to work best.',
+      ttsStylePlaceholder: 'For example:\nRole: a patient technical adviser with a calm tone.\nScene: explaining a tricky problem to a colleague.\nDirection: slow pace, a slight pause at the end of a sentence, a little emphasis on key words.',
+      ttsStyleTags: 'Preset voices also accept inline tags such as (happy), (gentle) or (Cantonese); for a cloned voice, describe the delivery in words instead.',
+      // ── advanced ───────────────────────────────────────────────────────────
+      advancedTitle: 'Advanced',
+      providerSection: 'TTS service',
+      providerHint: 'Choose the service that reads the replies. You can add your own as long as it speaks the MiMo or the OpenAI-compatible format.',
+      addProvider: 'Add service',
+      editProvider: 'Edit service',
+      providerId: 'Service id',
+      providerIdHint: 'Lowercase letters, digits and dashes only; it cannot be changed later.',
+      providerLabel: 'Display name',
+      providerBaseUrl: 'Endpoint',
+      providerModel: 'Model',
+      providerVoice: 'Voice',
+      providerFormat: 'Response format',
+      providerApiKey: 'API key',
+      providerApiKeyEnv: 'Environment variable',
+      providerClone: 'Supports voice cloning',
+      providerDelete: 'Delete',
+      providerDeleteBuiltin: 'A built-in service cannot be deleted',
+      providerSaved: 'Saved',
+      providerDeleted: 'Deleted',
+      providerKind: 'Wire format',
+      kind_mimo: 'MiMo (chat/completions)',
+      kind_openaispeech: 'OpenAI-compatible (/audio/speech)',
+      kind_devtone: 'Local test tone',
+      referenceProviders: 'Reference setups',
+      referenceHint: 'These two were verified to work. Click one to fill the form with it.',
+      sensitivityTitle: 'Microphone sensitivity',
+      interruptSensitivity: 'Barge-in sensitivity',
+      interruptSensitivityHint: 'A higher value needs a louder voice to interrupt the reply being read. The noise stops interrupting on its own, but a quiet interjection may no longer cut in.',
+      minRms: 'Minimum volume',
+      minRmsHint: 'A higher value treats only louder sounds as the start of speech. It is steadier in a quiet room, but a very quiet sentence may be dropped entirely.',
+      sensitivityValue: 'Actual threshold',
+      sensitivityEffect: 'Takes effect on your next utterance',
+      // ── diagnostics and dependencies ───────────────────────────────────────
+      diagSection: 'Diagnostics and dependencies',
+      dependencyName: 'Dependency',
+      dependencyStatus: 'Status',
+      dependencySource: 'Resolved from',
+      dependencyVersion: 'Version',
+      dependencyRequired: 'Required',
+      depOk: 'Installed',
+      depMissing: 'Not installed',
+      depMismatch: 'Version mismatch',
+      depProvided: 'Supplied by DSH',
+      depInstall: 'Install',
+      depInstalling: 'Installing…',
+      depInstalled: 'Installed; restart DSH for it to take effect',
+      depInstallFailed: 'Install failed',
+      depRestartHint: 'A dependency installed into the DSH profile takes effect after DSH is restarted.',
+      depOptionalHint: 'onnxruntime-node only affects the endpoint detector (FireRedVAD). Without it another detector is used instead; recognition and speech still work.',
+      copyDiag: 'Copy diagnostics',
+      // ── version update ─────────────────────────────────────────────────────
+      versionSection: 'Version update',
+      currentVersion: 'Current version',
+      latestVersion: 'Latest version',
+      checkUpdate: 'Check for updates',
+      checking: 'Checking…',
+      upToDate: 'Already up to date',
+      updateAvailable: 'A new version is available',
+      updateNow: 'Update now',
+      updateConfirm: 'The update is installed into the DSH profile with pnpm and may need a DSH restart. Continue?',
+      updateInstalling: 'Installing…',
+      updateDone: 'Update complete; please restart DSH',
+      updateFailed: 'Update failed',
+      updateUnreachable: 'The version service could not be reached; check the network and try again',
+      updateManual: 'Manual install command',
+      updateNoServer: 'The check reads the public GitHub release directly; no extra server is needed.',
+      // ── model preparation ──────────────────────────────────────────────────
+      modelPrepTitle: 'Model preparation',
+      modelPrepHint: 'Model preparation downloads the local recognition models (SenseVoice plus the endpoint detector). It runs offline, needs no key, and is what lets the plugin understand you. The TTS service settings are separate: they read the reply aloud.',
+      preparingModel: 'Preparing models…',
     };
     // ──────────────────────────────────────────────────────────────── styling
 
@@ -1022,6 +1298,32 @@ body[data-ds-dark-theme] .dshv-panel button:hover:not(:disabled){background:rgba
 .dshv-panel button:disabled{opacity:.5;cursor:default}
 .dshv-panel select,.dshv-panel input,.dshv-panel textarea{min-width:0}
 .dshv-panel ::placeholder{color:var(--dsw-alias-label-tertiary,currentColor);opacity:.8}
+/* The tabs split a long sheet into three pages. They sit below the sticky head
+   and above the content, and the selected one is marked by its colour and
+   weight rather than by a box, so the strip stays quiet. */
+.dshv-tabs{display:flex;gap:4px;margin:0 0 4px;padding:2px;border-radius:12px;
+  background:var(--dshv-field)}
+.dshv-tabpanel{display:block}
+.dshv-tab{flex:1;min-width:0;padding:6px 4px;border:0;border-radius:10px;background:none;
+  font:inherit;font-size:12px;color:var(--dsw-alias-label-secondary,inherit);
+  text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}
+.dshv-tab:hover{background:rgba(120,120,128,.16)}
+body[data-ds-dark-theme] .dshv-tab:hover{background:rgba(255,255,255,.12)}
+.dshv-tab[data-active="true"]{background:var(--dshv-glass);color:var(--dshv-accent);font-weight:600;
+  box-shadow:0 1px 2px rgba(0,0,0,.08)}
+/* The dependency list answers "is it installed, and where did it come from". */
+.dshv-dep{margin:7px 0;padding:7px 8px;border-radius:12px;background:var(--dshv-field)}
+.dshv-dep-head{display:flex;align-items:center;gap:8px;margin-bottom:2px}
+.dshv-dep-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-size:12.5px;font-weight:600}
+.dshv-dep-state{flex:none;font-size:10.5px;padding:1px 6px;border-radius:9px;
+  color:var(--dsw-alias-label-secondary,inherit)}
+.dshv-dep-state[data-state="ok"]{color:#10b981}
+.dshv-dep-state[data-state="missing"]{color:var(--dshv-warn)}
+.dshv-dep-state[data-state="mismatch"]{color:var(--dshv-record)}
+.dshv-dep-log{max-height:140px;overflow:auto;margin:6px 0 0;padding:6px;border-radius:9px;
+  background:var(--dshv-field);font-family:ui-monospace,Consolas,monospace;font-size:10.5px;
+  line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}
 /* The sheet scrolls inside itself, so its head has to stay put: it carries the
    readiness dot and the only way out. It re-declares the glass because the
    content would otherwise show through as it scrolls underneath. */
@@ -1062,8 +1364,6 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
   rgba(255,255,255,.34) 0 9px,rgba(255,255,255,0) 9px 18px);
   background-size:200% 100%;animation:dshv-stripes 1.15s linear infinite}
 @keyframes dshv-stripes{from{background-position:0 0}to{background-position:-36px 0}}
-.dshv-diag{margin-top:5px;color:var(--dsw-alias-label-secondary,inherit)}
-.dshv-diag summary{cursor:pointer;font-size:11.5px}
 .dshv-diag-actions{display:flex;gap:10px;align-items:center;margin-top:6px}
 .dshv-copy{border:0;background:none;padding:0;font:inherit;color:var(--dshv-accent);cursor:pointer}
 
@@ -1225,8 +1525,11 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
           // down, and the old values (-38 dBFS to start, a -40 dBFS gate) cut it
           // off entirely. The host VAD already rejects noise, so the client-side
           // gate can afford to sit far lower.
-          rmsThreshold: 0.005,
-          interruptThreshold: 0.035,
+          //
+          // The two thresholds are read from the settings panel, and fall back
+          // to the values this plugin has always used.
+          rmsThreshold: sliderToThreshold(SENSITIVITY.minRms, readSlider('minRms', SENSITIVITY.minRms)),
+          interruptThreshold: sliderToThreshold(SENSITIVITY.interrupt, readSlider('sensitivity', SENSITIVITY.interrupt)),
           interruptHoldMs: 220,
           noiseGateDb: -60,
         },
@@ -2377,6 +2680,23 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
       const [, force] = useState(0);
       const panelRef = useRef(null);
       const [sheetHeight, setSheetHeight] = useState(0);
+      // Which tab is showing. The state lives here, above the tabs, so
+      // switching tabs never discards what was typed into a field.
+      const [tab, setTab] = useState('voices');
+      // The persona and the speaking style are edited locally and saved
+      // together, so a half-finished edit is not pushed to the model.
+      const [persona, setPersona] = useState('');
+      const [style, setStyle] = useState('');
+      // The provider list and the dependency report, loaded on demand.
+      const [providers, setProviders] = useState(null);
+      const [deps, setDeps] = useState(null);
+      const [depsInstall, setDepsInstall] = useState(null);
+      const [update, setUpdate] = useState(null);
+      // The two microphone sliders, in the same 0-100 units they show.
+      const [sensitivity, setSensitivity] = useState(() => readSlider('sensitivity', SENSITIVITY.interrupt));
+      const [minRms, setMinRms] = useState(() => readSlider('minRms', SENSITIVITY.minRms));
+      // The provider form, for adding or editing one.
+      const [providerForm, setProviderForm] = useState(null);
       const config = engine.config ?? {};
       const currentVoice = readString(STORAGE.voice, '') || config.voice || 'mimo_default';
       const progress = prepareView(engine.prepare);
@@ -2490,6 +2810,481 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
           ? { tone: 'warn', text: config.vadNote ? `${t('notReady')} · ${config.vadNote}` : t('notReady') }
           : { tone: 'quiet', text: '…' };
 
+      // The provider the replies are read with. The list is fetched when the
+      // tab is opened, because most sessions never need it.
+      const providerList = providers ?? engine.providers ?? [];
+      const selectedProvider = providerList.find((entry) => entry.id === config.provider) ?? null;
+      const cloneSupported = selectedProvider?.clone === true;
+
+      // Load the provider list and the dependency report the first time the
+      // advanced tab is shown, so opening the sheet stays cheap.
+      useEffect(() => {
+        if (tab !== 'advanced') return;
+        if (providers === null) {
+          void client.providers()
+            .then((payload) => setProviders(payload.providers ?? []))
+            .catch(() => setProviders([]));
+        }
+        if (deps === null) {
+          void client.dependencies()
+            .then((payload) => setDeps(payload.entries ?? []))
+            .catch(() => setDeps([]));
+        }
+      }, [tab, providers, deps]);
+
+      // Fill the persona and style fields from the configuration the first
+      // time the persona tab is shown, so an edit is never overwritten while
+      // it is being typed.
+      const [personaLoaded, setPersonaLoaded] = useState(false);
+      useEffect(() => {
+        if (personaLoaded) return;
+        setPersona(String(config.persona ?? ''));
+        setStyle(String(config.instruction ?? ''));
+        setPersonaLoaded(true);
+      }, [personaLoaded, config.persona, config.instruction]);
+
+      // Store a slider position and apply it to the running engine, so the
+      // next utterance uses it.
+      const applySensitivity = (key, position) => {
+        writeString(STORAGE[key], String(position));
+        const options = { ...engine.options };
+        if (key === 'sensitivity') {
+          options.interruptThreshold = sliderToThreshold(SENSITIVITY.interrupt, position);
+          setSensitivity(position);
+        } else {
+          options.rmsThreshold = sliderToThreshold(SENSITIVITY.minRms, position);
+          setMinRms(position);
+        }
+        setEngine({ options });
+      };
+
+      // Save the persona and the speaking style together.
+      const savePersona = () => {
+        void withBusy('保存人设', async () => {
+          await client.configure({ persona, instruction: style });
+          await refreshState();
+          setNote(t('providerSaved'));
+        });
+      };
+
+      // Check for a newer release.
+      const checkUpdate = () => {
+        void withBusy('检查更新', async () => {
+          const result = await client.version();
+          setUpdate(result);
+        });
+      };
+
+      // Install a newer release, after the user has been told what it does.
+      const installUpdate = () => {
+        const latest = update?.latest;
+        if (!latest) return;
+        if (!window.confirm(t('updateConfirm'))) return;
+        const spec = `github:HimaCSR/dsh-voice-chat@v${latest}`;
+        void withBusy('更新', async () => {
+          const result = await client.installVersion(spec);
+          setUpdate({ ...update, install: result });
+        });
+      };
+
+      // Install one missing dependency into the DSH profile.
+      const installDependency = (entry) => {
+        void withBusy(`安装 ${entry.name}`, async () => {
+          setDepsInstall({ running: true, name: entry.name, output: [], error: null });
+          await client.installDependency(entry.name, entry.required ?? '');
+          // The install runs in the background; its log is polled until it
+          // stops.
+          const poll = async () => {
+            const state = await client.dependencyInstallStatus();
+            setDepsInstall(state);
+            if (state.running === true) {
+              window.setTimeout(() => void poll(), 900);
+              return;
+            }
+            const refreshed = await client.dependencies();
+            setDeps(refreshed.entries ?? []);
+          };
+          await poll();
+        });
+      };
+
+      // Add or change one provider.
+      const saveProvider = () => {
+        if (providerForm === null) return;
+        const record = { ...providerForm };
+        void withBusy('保存服务', async () => {
+          const payload = await client.saveProvider(record);
+          setProviders(payload.providers ?? []);
+          setProviderForm(null);
+          await refreshState();
+        });
+      };
+
+      // ── the tab bar
+      const tabButton = (id, label) => h('button', {
+        type: 'button',
+        className: 'dshv-tab',
+        role: 'tab',
+        'aria-selected': tab === id ? 'true' : 'false',
+        'data-active': tab === id ? 'true' : 'false',
+        onClick: () => setTab(id),
+      }, label);
+
+      // ── tab: voice preferences
+      const voicesTab = h('div', { role: 'tabpanel', className: 'dshv-tabpanel' },
+        h('div', { style: styles.section },
+          h('div', { style: styles.sectionHead }, h('span', null, t('voice'))),
+          h('div', { style: styles.row },
+            h('select', {
+              style: { ...styles.field, flex: 1 },
+              value: currentVoice,
+              onChange: (event) => pickVoice(event.target.value),
+            },
+              h('optgroup', { label: t('provider') },
+                presets.map((preset) => h('option', { key: preset.id, value: preset.id }, preset.label))),
+              voices.length > 0
+                ? h('optgroup', { label: t('newVoice') },
+                  voices.map((voice) => h('option', { key: voice.name, value: `clone:${voice.name}` },
+                    `🎤 ${voice.name}（克隆）`)))
+                : null,
+            )),
+          voices.map((voice) => h('div', { key: voice.name, className: 'dshv-voicecard' },
+            h('div', { className: 'dshv-voicehead' },
+              h('span', {
+                style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+                title: voice.refText || voice.name,
+              }, voice.name),
+              h('span', { style: styles.note }, `${Math.round(voice.bytes / 1024)} KB`),
+              h(Button, {
+                style: styles.knob,
+                onClick: () => void withBusy('删除音色', async () => {
+                  await client.deleteVoice(voice.name);
+                  await refreshState();
+                }),
+              }, t('remove'))),
+            h('audio', { src: client.sampleUrl(voice.name), controls: true })))),
+        // Cloning needs a provider that can do it; say so rather than letting
+        // the upload fail later.
+        cloneSupported
+          ? h('details', { style: styles.section },
+            h('summary', { style: { cursor: 'pointer', fontSize: 12.5, fontWeight: 600 } }, t('newVoice')),
+            h('div', { style: styles.row }, h('input', {
+              style: styles.field,
+              placeholder: t('voiceName'),
+              value: name,
+              onChange: (event) => setName(event.target.value),
+            })),
+            h('div', { style: styles.row }, h('input', {
+              style: styles.field,
+              type: 'file',
+              accept: 'audio/wav,audio/mpeg,.wav,.mp3',
+              onChange: (event) => setFile(event.target.files?.[0] ?? null),
+            })),
+            h('div', { style: styles.row }, h('span', { style: styles.note }, t('upload'))),
+            h('div', { style: styles.row }, h('input', {
+              style: styles.field,
+              placeholder: t('refText'),
+              value: refText,
+              onChange: (event) => setRefText(event.target.value),
+            })),
+            h('div', { style: { margin: '8px 0 2px' } },
+              h(Button, { className: 'dshv-primary', disabled: busy !== null, onClick: upload }, t('create'))))
+          : h('div', { style: styles.section },
+            h('div', { style: styles.sectionHead }, h('span', null, t('newVoice'))),
+            h('div', { style: styles.note }, t('noCloneSupport'))),
+      );
+
+      // ── tab: persona
+      const personaTab = h('div', { role: 'tabpanel', className: 'dshv-tabpanel' },
+        h('div', { style: styles.section },
+          h('div', { style: styles.sectionHead }, h('span', null, t('personaTitle'))),
+          h('div', { style: styles.note }, t('personaHint')),
+          h('div', { style: { margin: '6px 0 2px' } }, h('textarea', {
+            style: { ...styles.field, width: '100%', minHeight: 84, resize: 'vertical', font: 'inherit', fontSize: 12.5 },
+            placeholder: t('personaPlaceholder'),
+            value: persona,
+            onChange: (event) => setPersona(event.target.value),
+          }))),
+        h('div', { style: styles.section },
+          h('div', { style: styles.sectionHead }, h('span', null, t('ttsStyleTitle'))),
+          h('div', { style: styles.note }, t('ttsStyleHint')),
+          h('div', { style: { margin: '6px 0 2px' } }, h('textarea', {
+            style: { ...styles.field, width: '100%', minHeight: 84, resize: 'vertical', font: 'inherit', fontSize: 12.5 },
+            placeholder: t('ttsStylePlaceholder'),
+            value: style,
+            onChange: (event) => setStyle(event.target.value),
+          })),
+          h('div', { style: styles.note }, t('ttsStyleTags'))),
+        h('div', { style: styles.section },
+          h('div', { style: styles.sectionHead }, h('span', null, t('languageLabel'))),
+          h('div', { style: styles.row },
+            h('select', {
+              style: { ...styles.field, flex: 1 },
+              value: language,
+              onChange: (event) => {
+                writeString(STORAGE.language, event.target.value);
+                setEngine({ config: { ...engine.config, language: event.target.value } });
+                force((value) => value + 1);
+              },
+            },
+              ['auto', 'zh', 'en', 'yue', 'ja', 'ko'].map((code) =>
+                h('option', { key: code, value: code }, t(`lang_${code}`)))))),
+        h('div', { style: { margin: '10px 0 2px' } },
+          h(Button, { className: 'dshv-primary', disabled: busy !== null, onClick: savePersona },
+            busy === '保存人设' ? `${t('save')}…` : t('save'))),
+      );
+
+      // ── tab: advanced — the TTS service, the microphone, and the two
+      // housekeeping sections: diagnostics with the dependency audit, and the
+      // version check.
+      const providerFormView = providerForm === null ? null : h('details', {
+        style: styles.section,
+        open: true,
+      },
+        h('summary', { style: { cursor: 'pointer', fontSize: 12.5, fontWeight: 600 } },
+          providerForm.existing === true ? t('editProvider') : t('addProvider')),
+        h('div', { style: styles.row }, h('span', { style: styles.label }, t('providerId')),
+          h('input', {
+            style: { ...styles.field, flex: 1, minWidth: 0 },
+            value: providerForm.id,
+            placeholder: 'my-tts',
+            disabled: providerForm.existing === true,
+            onChange: (event) => setProviderForm({ ...providerForm, id: event.target.value }),
+          })),
+        providerForm.existing === true ? null : h('div', { style: styles.note }, t('providerIdHint')),
+        h('div', { style: styles.row }, h('span', { style: styles.label }, t('providerLabel')),
+          h('input', {
+            style: { ...styles.field, flex: 1, minWidth: 0 },
+            value: providerForm.label ?? '',
+            onChange: (event) => setProviderForm({ ...providerForm, label: event.target.value }),
+          })),
+        h('div', { style: styles.row }, h('span', { style: styles.label }, t('providerKind')),
+          h('select', {
+            style: { ...styles.field, flex: 1 },
+            value: providerForm.kind ?? 'openai-speech',
+            onChange: (event) => setProviderForm({ ...providerForm, kind: event.target.value }),
+          }, ['mimo', 'openai-speech', 'dev-tone'].map((kind) =>
+            h('option', { key: kind, value: kind }, t(`kind_${kind.replace(/-/g, '')}`))))),
+        h('div', { style: styles.row }, h('span', { style: styles.label }, t('providerBaseUrl')),
+          h('input', {
+            style: { ...styles.field, flex: 1, minWidth: 0 },
+            value: providerForm.baseUrl ?? '',
+            placeholder: 'https://api.example.com/v1',
+            onChange: (event) => setProviderForm({ ...providerForm, baseUrl: event.target.value }),
+          })),
+        h('div', { style: styles.row }, h('span', { style: styles.label }, t('providerModel')),
+          h('input', {
+            style: { ...styles.field, flex: 1, minWidth: 0 },
+            value: providerForm.model ?? '',
+            onChange: (event) => setProviderForm({ ...providerForm, model: event.target.value }),
+          })),
+        h('div', { style: styles.row }, h('span', { style: styles.label }, t('providerVoice')),
+          h('input', {
+            style: { ...styles.field, flex: 1, minWidth: 0 },
+            value: providerForm.voice ?? '',
+            onChange: (event) => setProviderForm({ ...providerForm, voice: event.target.value }),
+          })),
+        h('div', { style: styles.row }, h('span', { style: styles.label }, t('providerFormat')),
+          h('select', {
+            style: { ...styles.field, flex: 1 },
+            value: providerForm.format ?? 'wav',
+            onChange: (event) => setProviderForm({ ...providerForm, format: event.target.value }),
+          }, ['wav', 'mp3', 'pcm'].map((format) => h('option', { key: format, value: format }, format)))),
+        h('div', { style: styles.row }, h('span', { style: styles.label }, t('providerApiKey')),
+          h('input', {
+            style: { ...styles.field, flex: 1, minWidth: 0 },
+            type: 'password',
+            placeholder: 'sk-…',
+            value: providerForm.apiKey ?? '',
+            onChange: (event) => setProviderForm({ ...providerForm, apiKey: event.target.value }),
+          })),
+        h('div', { style: styles.row }, h('span', { style: styles.label }, t('providerApiKeyEnv')),
+          h('input', {
+            style: { ...styles.field, flex: 1, minWidth: 0 },
+            value: providerForm.apiKeyEnv ?? '',
+            onChange: (event) => setProviderForm({ ...providerForm, apiKeyEnv: event.target.value }),
+          })),
+        h('div', { style: styles.row }, h('span', { style: styles.label }, t('providerClone')),
+          h('input', {
+            type: 'checkbox',
+            checked: providerForm.clone === true,
+            onChange: (event) => setProviderForm({ ...providerForm, clone: event.target.checked }),
+          })),
+        h('div', { style: { margin: '8px 0 2px', display: 'flex', gap: 8 } },
+          h(Button, { className: 'dshv-primary', disabled: busy !== null, onClick: saveProvider }, t('save')),
+          h(Button, { style: styles.knob, onClick: () => setProviderForm(null) }, t('close'))),
+      );
+
+      const dependencyRow = (entry) => h('div', { key: entry.name, className: 'dshv-dep' },
+        h('div', { className: 'dshv-dep-head' },
+          h('span', { className: 'dshv-dep-name' }, entry.name),
+          h('span', { className: 'dshv-dep-state', 'data-state': entry.status },
+            entry.kind === 'dsh'
+              ? t('depProvided')
+              : entry.status === 'ok' ? t('depOk') : entry.status === 'missing' ? t('depMissing') : t('depMismatch'))),
+        h('div', { className: 'dshv-kv' }, h('span', null, t('dependencyVersion')),
+          h('span', null, entry.version ?? '—')),
+        h('div', { className: 'dshv-kv' }, h('span', null, t('dependencyRequired')),
+          h('span', null, entry.required ?? '—')),
+        h('div', { className: 'dshv-kv' }, h('span', null, t('dependencySource')),
+          h('span', { title: entry.resolved ?? '' }, entry.resolvedFrom ?? '—')),
+        entry.reason ? h('div', { style: styles.note }, entry.reason) : null,
+        // Only a dependency the plugin owns can be installed; the ones DSH
+        // ships are reported but not touched.
+        entry.kind === 'plugin' && entry.status !== 'ok'
+          ? h('div', { style: { marginTop: 5 } },
+            h(Button, {
+              style: styles.knob,
+              disabled: busy !== null,
+              onClick: () => installDependency(entry),
+            }, busy === `安装 ${entry.name}` ? t('depInstalling') : t('depInstall')))
+          : null,
+      );
+
+      const advancedTab = h('div', { role: 'tabpanel', className: 'dshv-tabpanel' },
+        h('div', { style: styles.section },
+          h('div', { style: styles.sectionHead }, h('span', null, t('providerSection'))),
+          h('div', { style: styles.note }, t('providerHint')),
+          h('div', { style: styles.row },
+            h('select', {
+              style: { ...styles.field, flex: 1 },
+              value: config.provider ?? 'mimo',
+              onChange: (event) => void withBusy('切换服务', async () => {
+                await client.configure({ provider: event.target.value });
+                await refreshState();
+              }),
+            }, providerList.map((entry) => h('option', { key: entry.id, value: entry.id }, entry.label))),
+          ),
+          h('div', { style: { margin: '6px 0 2px', display: 'flex', gap: 8, flexWrap: 'wrap' } },
+            h(Button, {
+              style: styles.knob,
+              onClick: () => setProviderForm({
+                id: '', label: '', kind: 'openai-speech', baseUrl: '', model: '', voice: '',
+                format: 'mp3', apiKey: '', apiKeyEnv: '', clone: false, existing: false,
+              }),
+            }, t('addProvider')),
+            // The two verified free reference setups, offered as one click.
+            providerList.filter((entry) => entry.reference === true).map((entry) =>
+              h(Button, {
+                style: styles.knob,
+                onClick: () => setProviderForm({
+                  id: entry.id, label: entry.label, kind: entry.kind, baseUrl: entry.baseUrl,
+                  model: entry.model, voice: entry.voice, format: entry.format,
+                  apiKey: '', apiKeyEnv: entry.apiKeyEnv, clone: false, existing: true,
+                }),
+              }, entry.label))),
+          ),
+          providerFormView,
+          h('div', { style: styles.row },
+            h('span', { style: styles.label }, t('providerApiKey')),
+            h('input', {
+              style: { ...styles.field, flex: 1, minWidth: 0 },
+              type: 'password',
+              placeholder: 'sk-…',
+              value: draftKey,
+              onChange: (event) => setDraftKey(event.target.value),
+            }),
+            h(Button, {
+              style: styles.knob,
+              disabled: busy !== null,
+              onClick: () => void withBusy('保存 Key', async () => {
+                await client.configure({ apiKey: draftKey });
+                setDraftKey('');
+                await refreshState();
+              }),
+            }, t('save'))),
+        h('div', { style: styles.section },
+          h('div', { style: styles.sectionHead }, h('span', null, t('sensitivityTitle'))),
+          h('div', { style: styles.row },
+            h('span', { style: { ...styles.label, minWidth: 92 } }, t('interruptSensitivity')),
+            h('input', {
+              type: 'range', min: 0, max: 100, step: 1,
+              style: { flex: 1, minWidth: 0 },
+              value: sensitivity,
+              onChange: (event) => applySensitivity('sensitivity', Number(event.target.value)),
+            }),
+            h('span', { style: { ...styles.note, minWidth: 48, textAlign: 'right' } },
+              sliderToThreshold(SENSITIVITY.interrupt, sensitivity).toFixed(3))),
+          h('div', { style: styles.note }, t('interruptSensitivityHint')),
+          h('div', { style: styles.row },
+            h('span', { style: { ...styles.label, minWidth: 92 } }, t('minRms')),
+            h('input', {
+              type: 'range', min: 0, max: 100, step: 1,
+              style: { flex: 1, minWidth: 0 },
+              value: minRms,
+              onChange: (event) => applySensitivity('minRms', Number(event.target.value)),
+            }),
+            h('span', { style: { ...styles.note, minWidth: 48, textAlign: 'right' } },
+              sliderToThreshold(SENSITIVITY.minRms, minRms).toFixed(3))),
+          h('div', { style: styles.note }, t('minRmsHint')),
+          h('div', { style: styles.note }, t('sensitivityEffect'))),
+        h('div', { style: styles.section },
+          h('div', { style: styles.sectionHead }, h('span', null, t('modelPrepTitle'))),
+          h('div', { style: styles.note }, t('modelPrepHint'))),
+        h('div', { style: styles.section },
+          h('div', { style: styles.sectionHead }, h('span', null, t('diagSection'))),
+          h('div', { className: 'dshv-kv' }, h('span', null, t('sttBackend')),
+            h('span', null, `${config.sttBackend ?? '—'} · ${config.precision ?? '—'}`)),
+          h('div', { className: 'dshv-kv' }, h('span', null, t('vadBackend')),
+            h('span', null, config.vadBackendEffective ?? config.vadBackend ?? '—')),
+          config.vadNote ? h('div', { style: styles.note }, config.vadNote) : null,
+          h('div', { style: { marginTop: 8, marginBottom: 2 } },
+            h('span', { style: { fontSize: 12.5, fontWeight: 600 } }, t('dependencyName'))),
+          h('div', { style: styles.note }, t('depOptionalHint')),
+          (deps ?? []).map(dependencyRow),
+          depsInstall !== null && depsInstall.running === true
+            ? h('div', { style: styles.note }, t('depInstalling'))
+            : null,
+          depsInstall !== null && depsInstall.phase === 'done'
+            ? h('div', { style: styles.note }, t('depInstalled'))
+            : null,
+          depsInstall !== null && depsInstall.error
+            ? h('div', { style: styles.error }, `${t('depInstallFailed')}：${depsInstall.error}`)
+            : null,
+          depsInstall !== null && Array.isArray(depsInstall.output) && depsInstall.output.length > 0
+            ? h('pre', { className: 'dshv-dep-log' }, depsInstall.output.join('\n'))
+            : null,
+          depsInstall !== null ? h('div', { style: styles.note }, t('depRestartHint')) : null,
+          h('div', { style: { marginTop: 6 } }, h('div', { style: styles.note }, config.dataRoot ?? '—')),
+          h('div', { className: 'dshv-diag-actions' },
+            h('button', { type: 'button', className: 'dshv-copy', onClick: copyDiagnostics }, t('copyDiag')),
+            note !== null ? h('span', { style: styles.note }, note) : null)),
+        h('div', { style: styles.section },
+          h('div', { style: styles.sectionHead }, h('span', null, t('versionSection'))),
+          h('div', { style: styles.note }, t('updateNoServer')),
+          h('div', { className: 'dshv-kv' }, h('span', null, t('currentVersion')),
+            h('span', null, config.version ?? '—')),
+          update !== null && update.reachable === true
+            ? h('div', { className: 'dshv-kv' }, h('span', null, t('latestVersion')),
+              h('span', null, update.latest ?? '—'))
+            : null,
+          update !== null && update.reachable === false
+            ? h('div', { style: styles.note }, t('updateUnreachable'))
+            : null,
+          update !== null && update.hasUpdate === true
+            ? h('div', { style: { marginTop: 6 } },
+              h(Button, { className: 'dshv-primary', disabled: busy !== null, onClick: installUpdate },
+                busy === '更新' ? t('updateInstalling') : t('updateNow')))
+            : null,
+          update !== null && update.hasUpdate === false && update.reachable === true
+            ? h('div', { style: styles.note }, t('upToDate'))
+            : null,
+          update !== null && update.notes
+            ? h('div', { style: styles.note }, update.notes.slice(0, 400))
+            : null,
+          update !== null && update.install?.error
+            ? h('div', { style: styles.error }, `${t('updateFailed')}：${update.install.error}`)
+            : null,
+          update !== null && update.install?.manual
+            ? h('div', { style: styles.note }, `${t('updateManual')}：${update.install.manual}`)
+            : null,
+          h('div', { style: { marginTop: 8 } },
+            h(Button, { style: styles.knob, disabled: busy !== null, onClick: checkUpdate },
+              busy === '检查更新' ? t('checking') : t('checkUpdate')))),
+      );
+
+      const tabContent = tab === 'persona' ? personaTab : tab === 'advanced' ? advancedTab : voicesTab;
+
       return h(
         'div',
         { className: 'dshv-backdrop', onClick: onClose, 'aria-hidden': 'true' },
@@ -2559,117 +3354,15 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
               }, busy === '准备模型' ? t('preparing') : t('prepare')))
             : null,
 
-          // ── voice: pick one, audition it, delete it
-          h('div', { style: styles.section },
-            h('div', { style: styles.sectionHead }, h('span', null, t('voice'))),
-            h('div', { style: styles.row },
-              h('select', {
-                style: { ...styles.field, flex: 1 },
-                value: currentVoice,
-                onChange: (event) => pickVoice(event.target.value),
-              },
-                h('optgroup', { label: t('provider') },
-                  presets.map((preset) => h('option', { key: preset.id, value: preset.id }, preset.label))),
-                voices.length > 0
-                  ? h('optgroup', { label: t('newVoice') },
-                    voices.map((voice) => h('option', { key: voice.name, value: `clone:${voice.name}` },
-                      `🎤 ${voice.name}（克隆）`)))
-                  : null,
-              )),
-            voices.map((voice) => h('div', { key: voice.name, className: 'dshv-voicecard' },
-              h('div', { className: 'dshv-voicehead' },
-                h('span', {
-                  style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-                  title: voice.refText || voice.name,
-                }, voice.name),
-                h('span', { style: styles.note }, `${Math.round(voice.bytes / 1024)} KB`),
-                h(Button, {
-                  style: styles.knob,
-                  onClick: () => void withBusy('删除音色', async () => {
-                    await client.deleteVoice(voice.name);
-                    await refreshState();
-                  }),
-                }, t('remove'))),
-              h('audio', { src: client.sampleUrl(voice.name), controls: true })))),
+          // ── the tabs. The state of the plugin — status, errors, the model
+          // download — stays above them, because it describes the plugin and
+          // not one part of its configuration.
+          h('div', { className: 'dshv-tabs', role: 'tablist' },
+            tabButton('voices', t('tabVoices')),
+            tabButton('persona', t('tabPersona')),
+            tabButton('advanced', t('tabAdvanced'))),
 
-          // ── add a clone: collapsed to one line until it is wanted
-          h('details', { style: styles.section },
-            h('summary', { style: { cursor: 'pointer', fontSize: 12.5, fontWeight: 600 } }, t('newVoice')),
-            h('div', { style: styles.row }, h('input', {
-              style: styles.field,
-              placeholder: t('voiceName'),
-              value: name,
-              onChange: (event) => setName(event.target.value),
-            })),
-            h('div', { style: styles.row }, h('input', {
-              style: styles.field,
-              type: 'file',
-              accept: 'audio/wav,audio/mpeg,.wav,.mp3',
-              onChange: (event) => setFile(event.target.files?.[0] ?? null),
-            })),
-            h('div', { style: styles.row }, h('span', { style: styles.note }, t('upload'))),
-            h('div', { style: styles.row }, h('input', {
-              style: styles.field,
-              placeholder: t('refText'),
-              value: refText,
-              onChange: (event) => setRefText(event.target.value),
-            })),
-            h('div', { style: { margin: '8px 0 2px' } },
-              h(Button, { className: 'dshv-primary', disabled: busy !== null, onClick: upload }, t('create')))),
-
-          // ── credentials + language
-          h('div', { style: styles.section },
-            h('div', { style: styles.sectionHead },
-              h('span', null, t('apiKey')),
-              h('span', { style: styles.note },
-                config.hasKey === true ? (config.keySource === 'env' ? 'env' : 'saved') : '—')),
-            h('div', { style: styles.row },
-              h('input', {
-                style: { ...styles.field, flex: 1, minWidth: 0 },
-                type: 'password',
-                placeholder: 'sk-…',
-                value: draftKey,
-                onChange: (event) => setDraftKey(event.target.value),
-              }),
-              h(Button, {
-                style: styles.knob,
-                disabled: busy !== null,
-                onClick: () => void withBusy('保存 Key', async () => {
-                  await client.configure({ apiKey: draftKey });
-                  setDraftKey('');
-                  await refreshState();
-                }),
-              }, t('save'))),
-            h('div', { style: styles.row },
-              h('span', { style: styles.label }, t('languageLabel')),
-              h('select', {
-                style: { ...styles.field, flex: 1 },
-                value: language,
-                onChange: (event) => {
-                  writeString(STORAGE.language, event.target.value);
-                  setEngine({ config: { ...engine.config, language: event.target.value } });
-                  force((value) => value + 1);
-                },
-              },
-                ['auto', 'zh', 'en', 'yue', 'ja', 'ko'].map((code) =>
-                  h('option', { key: code, value: code }, t(`lang_${code}`)))))),
-
-          // ── the numbers behind a bug report, folded away by default
-          h('details', { className: 'dshv-diag' },
-            h('summary', null, t('diag')),
-            h('div', { className: 'dshv-kv' }, h('span', null, t('sttBackend')),
-              h('span', null, `${config.sttBackend ?? '—'} · ${config.precision ?? '—'}`)),
-            h('div', { className: 'dshv-kv' }, h('span', null, t('vadBackend')),
-              h('span', null, config.vadBackendEffective ?? config.vadBackend ?? '—')),
-            h('div', { className: 'dshv-kv' }, h('span', null, t('provider')),
-              h('span', null, config.provider ?? '—')),
-            config.vadNote
-              ? h('div', { style: styles.note }, config.vadNote)
-              : null,
-            h('div', { style: styles.note }, config.dataRoot ?? '—'),
-            h('div', { className: 'dshv-diag-actions' },
-              h('button', { type: 'button', className: 'dshv-copy', onClick: copyDiagnostics }, t('copyDiag')),
-              note !== null ? h('span', { style: styles.note }, note) : null)),
+          tabContent,
 
           // The model download already has a real progress bar above; this plain
           // line is only for the short operations that have no bar of their own.

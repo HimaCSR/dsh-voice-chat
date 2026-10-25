@@ -126,7 +126,9 @@ dsh plugin --profile desktop add github:HimaCSR/dsh-voice-chat
 
 ---
 
-## 3. 配置 TTS（小米 MiMo）
+## 3. 配置 TTS 供应商
+
+### 默认：小米 MiMo
 
 在 [小米 MiMo 开放平台](https://mimo.mi.com/) 申请 API Key，然后**二选一**：
 
@@ -135,7 +137,27 @@ dsh plugin --profile desktop add github:HimaCSR/dsh-voice-chat
 
 **没有 Key 时**：识别、断句、插话打断全都照常可用，只有朗读会返回明确的 `no-api-key` 错误，不会静默失败。想先验证整条朗读链路（句子切分 → 合成请求 → 队列播放 → 打断），把 `provider` 改成 `dev-tone`，它会生成一段长度随句子变化的提示音。
 
+### 也可以换成别的供应商
+
+设置面板的**高级设置**页里有供应商下拉与配置表单，可以自己加。内置两个**已验证可用的免费参考配置**，点一下即填入表单，剩下的只要补上自己的 Key：
+
+| 参考配置 | 地址 | 模型 | Key 从哪来 |
+|---|---|---|---|
+| **OpenRouter** | `https://openrouter.ai/api/v1` | `fish-audio/s2.1-pro-free:free` | [openrouter.ai](https://openrouter.ai/) 注册后取 |
+| **硅基流动 SiliconFlow** | `https://api.siliconflow.cn/v1` | `FunAudioLLM/CosyVoice2-0.5B` | [siliconflow.cn](https://siliconflow.cn/) 注册后取 |
+
+表单里要填的东西：名称、接口格式（`mimo` 走 chat/completions，`openai-speech` 走 `/audio/speech`）、地址、模型、音色、音频格式、API Key 或环境变量名，以及「是否支持声音克隆」。
+
+两点要留意：
+
+- **格式不能乱填**。OpenRouter 只收 `mp3` 与 `pcm`，填 `wav` 会被它拒掉。填 `pcm` 时插件会自己包成 WAV 容器。
+- **克隆能力是供应商的属性**。给不支持克隆的供应商发克隆请求会明确报 `clone-unsupported`，而不是悄悄按普通音色合成。
+
+自己加的供应商存在 `tts.providers` 里（见第 8 节），删除走 `DELETE /providers?id=`；内置的删不掉。
+
 ### MiMo 的接口形状（实现依据）
+
+> 顺带一提：MiMo 的 **TTS 模型没有下线**。官方退役通知只涉及文本模型 `mimo-v2.5` / `mimo-v2.5-pro`（2026.10.21 退役，改为 v2.6-flash / v2.6-pro），`mimo-v2.5-tts` / `-voiceclone` / `-voicedesign` 仍在文档里，所以插件默认的模型名不变。
 
 它**不是** OpenAI 的 `/v1/audio/speech`，而是复用 chat completions：
 
@@ -271,11 +293,25 @@ sherpa-onnx **任何版本都不支持 FireRedVAD**（C API 只认 Silero 和 TE
 
 ---
 
-## 6. HTTP 接口（`/dsh-voice`，仅回环 + 同站点）
+## 6. 设置面板的三个页签
+
+设置面板原本是一整页，越加越长。现在拆成三页签，插件自身的状态（就绪、报错、模型下载进度）留在页签之上，因为它描述的是插件而不是某一项配置。
+
+| 页签 | 放什么 |
+|---|---|
+| **音色偏好** | 音色下拉、已克隆音色卡片与试听、克隆上传（仅在当前供应商支持克隆时出现） |
+| **人物设定** | 人物设定、语气指令、识别语言 |
+| **高级设置** | 供应商下拉与供应商配置表单、两个灵敏度滑杆、模型准备说明、诊断 + 依赖审查、版本更新 |
+
+版本更新按要求排在诊断之后。
+
+---
+
+## 7. HTTP 接口（`/dsh-voice`，仅回环 + 同站点）
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/state` | 引擎就绪度、模型准备进度、音色表、配置摘要 |
+| GET | `/state` | 引擎就绪度、模型准备进度、音色表、配置摘要、供应商列表、插件版本 |
 | POST | `/stt?language=zh` | 16 kHz 单声道 PCM16 或 WAV → `{ text, segments, speechSeconds, inferenceSeconds }` |
 | POST | `/tts` | `{ text, voice }` → 音频字节 |
 | POST | `/tts/plan` | 同上但只回答"会发什么请求"，不联网、不返回音频 |
@@ -284,8 +320,16 @@ sherpa-onnx **任何版本都不支持 FireRedVAD**（C API 只认 Silero 和 TE
 | DELETE | `/voices?name=` | 删除音色 |
 | GET | `/voices/sample?name=` | 参考音频字节（设置面板用它试听） |
 | POST | `/prepare` | 启动模型下载（立即 202，进度看 `/state`） |
-| POST | `/config` | 白名单字段持久化：`voice/apiKey/baseUrl/provider/model/cloneModel/format/instruction/language/vadBackend` |
-| GET | `/diag` | 原生模块解析报告：试过哪些解析根、每个根的结果，以及 worker 状态 |
+| POST | `/config` | 白名单字段持久化：`voice/apiKey/baseUrl/provider/model/cloneModel/format/instruction/language/vadBackend/persona` |
+| GET | `/providers` | 供应商列表（**只有 `hasKey` / `keySource`，没有明文 Key**） |
+| POST | `/providers` | 新增或修改一个供应商 |
+| DELETE | `/providers?id=` | 删除一个用户自建的供应商（内置的删不掉） |
+| GET | `/deps` | 依赖审查报告：版本、要求、来源、状态 |
+| POST | `/deps/install` | `{ name, range }` 把缺失的依赖装进当前 profile（立即 202） |
+| GET | `/deps/install/status` | 安装进度与日志 |
+| GET | `/version` | 当前版本 vs 最新发布版；取不到就说取不到 |
+| POST | `/version/install` | `{ spec }` 让 DSH 的插件管理器装一个新的发布版 |
+| GET | `/diag` | 原生模块解析报告 + 依赖审查：试过哪些解析根、每个根的结果、worker 状态 |
 
 `/diag` 是排查"FireRedVAD 为什么没生效"的第一站。它回答的是这个部署里唯一无法从外部确认的问题——插件的原生依赖到底从哪儿解析：
 
@@ -297,7 +341,7 @@ curl.exe -s http://127.0.0.1:19387/dsh-voice/diag
 
 ---
 
-## 7. 配置项
+## 8. 配置项
 
 配置写在 bundle 的 `cordis.patch.yml`（或 profile patch 里按行 id `voice-chat` 覆盖）：
 
@@ -315,21 +359,47 @@ stt:
   idleTimeoutMs: 300000    # 空闲多久回收 worker（0 = 常驻）
   modelDirectory: null     # 用已有 SenseVoice 目录（含 model.int8.onnx + tokens.txt）
 tts:
-  provider: mimo           # mimo | openai-speech | dev-tone
+  provider: mimo           # 当前选中的供应商 id
   model: mimo-v2.5-tts
   cloneModel: mimo-v2.5-tts-voiceclone
   baseUrl: https://api.xiaomimimo.com/v1
   voice: mimo_default
-  format: wav              # wav | mp3
+  format: wav              # wav | mp3 | pcm
   apiKeyEnv: MIMO_API_KEY
   maxChars: 1200           # 单次朗读文本上限
+  persona: ''              # 人物设定：怎么讲话、讲什么内容
+  providers: {}            # 用户自建的供应商表，按 id 索引
+update:
+  manifestUrl: ''          # 自定义发布清单地址；留空则查 GitHub Releases
 ```
 
-浏览器侧的偏好存在 localStorage：`dsh.voice.enabled`（朗读）、`dsh.voice.interrupt`（插话/排队）、`dsh.voice.voice`（音色）、`dsh.voice.language`（识别语言）。
+### 供应商是一张表，不是一堆字段
+
+`tts.providers` 按 id 索引，每个供应商自带这几样：
+
+| 字段 | 含义 |
+|---|---|
+| `id` | 标识（下拉框里选它） |
+| `label` | 显示名 |
+| `kind` | 由哪个适配器接管：`mimo` / `openai-speech` / `dev-tone` |
+| `baseUrl` `model` `voice` `format` | 请求形状 |
+| `apiKey` `apiKeyEnv` | 凭据；`apiKeyEnv` 指向环境变量名 |
+| `clone` | 是否支持声音克隆 |
+
+**旧配置不用改**：`tts.baseUrl` / `tts.model` / `tts.apiKey` 这些扁平字段在读取时会被归一化进当前选中的供应商，磁盘上的原字段保持不动。
+
+### 人物设定与语气指令
+
+- **人物设定**（`tts.persona`）管的是**说什么**。它被注入到 harness 的系统提示里，因此对话时就按这个人设来。
+- **语气指令**（`tts.instruction`）管的是**怎么念**。写法见 MiMo 官方的「导演模式」三段式 ——【角色】/【场景】/【指导】；情绪标签如 `(开心)`、`[叹气]` 写在要读的那句里。克隆音色同样受语气指令管辖。
+
+浏览器侧的偏好存在 localStorage：`dsh.voice.enabled`（朗读）、`dsh.voice.interrupt`（插话/排队）、`dsh.voice.voice`（音色）、`dsh.voice.language`（识别语言）、`dsh.voice.sensitivity`（打断灵敏度，0–100）、`dsh.voice.minRms`（最小音量，0–100）。
+
+两个滑杆存在浏览器而不是配置文件，因为 `/config` 只接受字符串，数字传过去会被丢掉。滑杆**数值越大越不敏感**（需要更响的声音才触发），好处是不再被环境噪音误触发，代价是轻声插话可能切不进来。
 
 ---
 
-## 8. 排错
+## 9. 排错
 
 | 现象 | 原因 / 处理 |
 |---|---|
@@ -350,7 +420,7 @@ tts:
 
 ---
 
-## 9. 已知限制
+## 10. 已知限制
 
 - **Windows x64 优先**。sherpa-onnx 原生包覆盖 macOS/Linux，但本插件的路径解析、SAPI 测试脚本与实测都在 Windows x64 上完成。
 - **FireRedVAD 依赖 `onnxruntime-node`**（约 287 MB，自带 win32/x64 预编译二进制）。没有它就只能用 TEN-VAD/Silero。
@@ -362,7 +432,7 @@ tts:
 
 ---
 
-## 10. 文件地图
+## 11. 文件地图
 
 ```
 dsh-voice-chat/
@@ -378,8 +448,11 @@ dsh-voice-chat/
     ├── engine.js           识别引擎装配（含原生库加载顺序这一关键约束）
     ├── worker.js           子进程入口：私有回环 HTTP + bearer token
     ├── stt.js              worker 生命周期（懒启动、串行化、空闲回收、崩溃重启）
-    ├── tts.js              MiMo / OpenAI 兼容 / dev-tone 三个适配器 + 请求描述
+    ├── tts.js              供应商适配：MiMo / OpenAI 兼容 / dev-tone + 供应商表归一化
     ├── voices.js           克隆音色库（含路径穿越防护）
+    ├── persona.js          人物设定 → harness 系统提示段落
+    ├── version.js          版本比较 + GitHub Releases 查询（带镜像回落与缓存）
+    ├── deps.js             依赖审查（版本 / 要求 / 来源 / 状态）与安装
     ├── routes.js           /dsh-voice 路由分发 + 回环/同站点校验 + 状态码映射
     ├── sherpa.js           原生模块解析（插件依赖 → DSH 安装目录锚点）
     └── util.js             WAV 编解码、原子写、流式下载、日志
@@ -387,7 +460,7 @@ dsh-voice-chat/
 
 ---
 
-## 11. 开发与验证
+## 12. 开发与验证
 
 **本仓库只含插件本体**，不含开发脚本 —— 验证脚手架要跑真模型、真 Host 进程，
 随插件分发没有意义。下面是发布前实际跑过的校验基线，**改动后请勿让这些数字下降**。
@@ -396,12 +469,13 @@ dsh-voice-chat/
 
 | 套件 | 结果 |
 |---|---|
-| 单元测试 | 18 / 18（含"浏览器半区 `apply()` 能跑通并注册两个 seat"与胶球几何） |
-| HTTP 契约 | 12 / 12 |
+| 单元测试 | 36 / 36（含"浏览器半区 `apply()` 能跑通并注册两个 seat"、胶球几何、供应商归一化、版本比较、依赖区间判断） |
+| HTTP 契约 | 22 / 22 |
 | Bundle 清单 / patch 静态校验 | 一致 |
 | FireRedVAD 数值闸门 | PASS（语音均值 0.709 / 覆盖率 86.3%，噪声与静音均 0 段） |
 | worker 端到端（真模型） | 7 / 7，含"FireRedVAD 不可用时降级到 sherpa 仍能正确识别"这一条回归 |
-| **活体验证（对运行中的 DSH GUI）** | **14 / 14** |
+| 样式类覆盖（`probe/design/render-orb.mjs`） | PASS（33 个类全部被渲染） |
+| **活体验证（对运行中的 DSH GUI）** | **18 / 18** |
 
 端到端识别结果（7.59 秒 SAPI 中文语音，FireRedVAD 主路径与 ten-vad 降级路径都实测）：
 
@@ -413,7 +487,9 @@ dsh-voice-chat/
 真语音转写 + FireRedVAD 分段、worker 报告 `vad=firered` 且无降级说明、噪声/静音拒识、
 8 kHz 输入被拒、无 Key 时 TTS 明确报错、预设与克隆两条 `/tts/plan` 请求形状、
 克隆音色新建→列表→试听→删除→重复删除 404、dev-tone 离线合成可播放 WAV、
-配置持久化、跨源 403、浏览器半区模块注册正确。
+配置持久化、跨源 403、浏览器半区模块注册正确，
+以及 1.1.0 新增的：状态里带版本与供应商列表、供应商列表不含明文 Key、
+依赖审查列出插件依赖与运行时自带依赖、版本检查（**网络不可达时报告"取不到"而不是判失败**）。
 
 ### 浏览器侧实测（真人对着麦克风，2026-10-12）
 
