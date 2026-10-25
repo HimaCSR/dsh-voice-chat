@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-voice-chat",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": true,
   "description": "本地 SenseVoice-Small 语音识别 + FireRedVAD 端点检测 + 线上 TTS（默认小米 MiMo，支持声音克隆）+ 插话打断",
   "type": "module",

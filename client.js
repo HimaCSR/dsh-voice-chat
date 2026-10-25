@@ -36,12 +36,23 @@ window.__ModuleLoader__.load({
     };
 
     /**
+     * What a provider id may look like.
+     *
+     * The id becomes a key in the stored map and is written into the Host's
+     * log, so it is limited to characters that are safe in both.
+     */
+    const PROVIDER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+    /**
      * The slider ranges, and the thresholds they stand for.
      *
      * The defaults are the values the plugin has always used, so a user who
-     * never touches a slider keeps the behaviour they know. A larger
-     * threshold means a louder voice is needed, which is why both sliders
-     * read as "how sensitive" rather than "how strict".
+     * never touches a slider keeps the behaviour they know.
+     *
+     * The sliders read as sensitivity, so they are mapped that way round: the
+     * further right, the lower the threshold and the easier it is to trigger.
+     * A higher threshold needs a louder voice, which is the opposite of what
+     * a slider labelled "sensitivity" is expected to do.
      */
     const SENSITIVITY = {
       interrupt: { min: 0.012, max: 0.060, default: 0.035 },
@@ -51,14 +62,14 @@ window.__ModuleLoader__.load({
     /** Map a 0-100 slider position onto a threshold. */
     function sliderToThreshold(range, position) {
       const value = Math.min(100, Math.max(0, Number(position) || 0));
-      return range.min + (range.max - range.min) * (value / 100);
+      return range.max - (range.max - range.min) * (value / 100);
     }
 
     /** Map a threshold back onto the 0-100 slider position. */
     function thresholdToSlider(range, threshold) {
       const value = Number(threshold);
       if (!Number.isFinite(value)) return 50;
-      const ratio = (value - range.min) / (range.max - range.min);
+      const ratio = (range.max - value) / (range.max - range.min);
       return Math.round(Math.min(100, Math.max(0, ratio * 100)));
     }
 
@@ -793,6 +804,7 @@ registerProcessor('voice-chat-mic', MicCapture);
       editProvider: '修改服务',
       providerId: '服务标识',
       providerIdHint: '只能用小写字母、数字和短横线；创建后不可更改。',
+      providerIdInvalid: '标识不合法：需以字母或数字开头，只能包含字母、数字、点和短横线。',
       providerLabel: '显示名称',
       providerBaseUrl: '接口地址',
       providerModel: '模型',
@@ -813,11 +825,11 @@ registerProcessor('voice-chat-mic', MicCapture);
       referenceHint: '下面两项是已验证可用的免费参考配置，点一下即可填入表单。',
       sensitivityTitle: '麦克风灵敏度',
       interruptSensitivity: '打断灵敏度',
-      interruptSensitivityHint: '调高后需要更大的声音才会打断正在朗读的回复。好处是环境噪声不再误触发；代价是轻声插话可能打断不了。',
+      interruptSensitivityHint: '调高后更容易打断正在朗读的回复，轻声插话也能插进去。代价是环境噪声更容易误触发；调低则需要更大的声音。',
       minRms: '最小音量',
-      minRmsHint: '调高后只有更响的声音才会被当成「开始说话」。好处是安静环境更稳；代价是说话太轻时整句可能被丢掉。',
+      minRmsHint: '调高后更小的声音也会被当成「开始说话」，安静环境里更容易被误触发；调低则只有更响的声音才算开口，代价是说话太轻时整句可能被丢掉。',
       sensitivityValue: '实际阈值',
-      sensitivityEffect: '下次说话生效',
+      sensitivityEffect: '立即生效',
       // ── diagnostics and dependencies ───────────────────────────────────────
       diagSection: '诊断与依赖',
       dependencyName: '依赖',
@@ -931,6 +943,7 @@ registerProcessor('voice-chat-mic', MicCapture);
       editProvider: 'Edit service',
       providerId: 'Service id',
       providerIdHint: 'Lowercase letters, digits and dashes only; it cannot be changed later.',
+      providerIdInvalid: 'Not a valid id: it must start with a letter or a digit and may only contain letters, digits, dots and dashes.',
       providerLabel: 'Display name',
       providerBaseUrl: 'Endpoint',
       providerModel: 'Model',
@@ -951,11 +964,11 @@ registerProcessor('voice-chat-mic', MicCapture);
       referenceHint: 'These two were verified to work. Click one to fill the form with it.',
       sensitivityTitle: 'Microphone sensitivity',
       interruptSensitivity: 'Barge-in sensitivity',
-      interruptSensitivityHint: 'A higher value needs a louder voice to interrupt the reply being read. The noise stops interrupting on its own, but a quiet interjection may no longer cut in.',
+      interruptSensitivityHint: 'A higher value makes it easier to interrupt the reply being read, so a quiet interjection cuts in too. The trade-off is that background noise interrupts more easily; a lower value needs a louder voice.',
       minRms: 'Minimum volume',
-      minRmsHint: 'A higher value treats only louder sounds as the start of speech. It is steadier in a quiet room, but a very quiet sentence may be dropped entirely.',
+      minRmsHint: 'A higher value treats even quieter sounds as the start of speech, which in a quiet room means more false starts; a lower value needs a louder voice, and a very quiet sentence may be dropped entirely.',
       sensitivityValue: 'Actual threshold',
-      sensitivityEffect: 'Takes effect on your next utterance',
+      sensitivityEffect: 'Takes effect immediately',
       // ── diagnostics and dependencies ───────────────────────────────────────
       diagSection: 'Diagnostics and dependencies',
       dependencyName: 'Dependency',
@@ -1556,6 +1569,10 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
             ready: state.ready === true,
             voices: state.voices ?? [],
             presets: state.presets ?? [],
+            // The provider list travels with the state, so the voice tab can
+            // tell whether the selected service can clone a voice without
+            // having to open the advanced tab first.
+            providers: state.providers ?? [],
             config: state.config ?? {},
           });
           if (state.error) setEngine({ error: state.error });
@@ -1662,12 +1679,14 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
       async function startListening(sessionId) {
         if (engine.recorder?.active) return;
         if (sessionId !== undefined) engine.sessionId = sessionId;
-        const recorder = new MicCapture({
-          ...engine.options,
+        // The recorder shares the engine's options object rather than a copy,
+        // so a threshold changed in the settings panel reaches the open
+        // microphone straight away.
+        const recorder = new MicCapture(Object.assign(engine.options, {
           onUtterance: (pcm) => void recognize(pcm),
           onBargeIn: () => interruptReply(),
           onSpeakingChange: (speaking) => setEngine({ listening: speaking ? 'speech' : 'open' }),
-        });
+        }));
         try {
           await recorder.start();
         } catch (error) {
@@ -2679,6 +2698,12 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
       const [file, setFile] = useState(null);
       const [, force] = useState(0);
       const panelRef = useRef(null);
+      // Whether the panel is still on screen. A background poll checks it
+      // before it touches any state, so closing the panel stops the polling.
+      const aliveRef = useRef(true);
+      useEffect(() => () => {
+        aliveRef.current = false;
+      }, []);
       const [sheetHeight, setSheetHeight] = useState(0);
       // Which tab is showing. The state lives here, above the tabs, so
       // switching tabs never discards what was typed into a field.
@@ -2832,12 +2857,14 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
         }
       }, [tab, providers, deps]);
 
-      // Fill the persona and style fields from the configuration the first
-      // time the persona tab is shown, so an edit is never overwritten while
-      // it is being typed.
+      // Fill the persona and style fields from the configuration, once it has
+      // arrived. The wait is for the configuration itself, not for the first
+      // render: a panel opened before the state came back would otherwise
+      // show empty fields and save them over what the Host actually holds.
       const [personaLoaded, setPersonaLoaded] = useState(false);
       useEffect(() => {
         if (personaLoaded) return;
+        if (config.persona === undefined) return;
         setPersona(String(config.persona ?? ''));
         setStyle(String(config.instruction ?? ''));
         setPersonaLoaded(true);
@@ -2847,7 +2874,11 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
       // next utterance uses it.
       const applySensitivity = (key, position) => {
         writeString(STORAGE[key], String(position));
-        const options = { ...engine.options };
+        // The options object is shared with the running recorder, which reads
+        // the thresholds on every frame. It is therefore changed in place: a
+        // fresh copy would leave the open microphone on the old thresholds
+        // until it was reopened.
+        const options = engine.options;
         if (key === 'sensitivity') {
           options.interruptThreshold = sliderToThreshold(SENSITIVITY.interrupt, position);
           setSensitivity(position);
@@ -2855,7 +2886,7 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
           options.rmsThreshold = sliderToThreshold(SENSITIVITY.minRms, position);
           setMinRms(position);
         }
-        setEngine({ options });
+        force((value) => value + 1);
       };
 
       // Save the persona and the speaking style together.
@@ -2893,9 +2924,12 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
           setDepsInstall({ running: true, name: entry.name, output: [], error: null });
           await client.installDependency(entry.name, entry.required ?? '');
           // The install runs in the background; its log is polled until it
-          // stops.
+          // stops. The poll gives up when the panel is closed, so it does not
+          // keep talking to a panel that is no longer on screen.
           const poll = async () => {
+            if (!aliveRef.current) return;
             const state = await client.dependencyInstallStatus();
+            if (!aliveRef.current) return;
             setDepsInstall(state);
             if (state.running === true) {
               window.setTimeout(() => void poll(), 900);
@@ -3025,6 +3059,9 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
                 writeString(STORAGE.language, event.target.value);
                 setEngine({ config: { ...engine.config, language: event.target.value } });
                 force((value) => value + 1);
+                // The language is also written to the Host's configuration, so
+                // it survives a reload and shows up in the diagnostics.
+                void client.configure({ language: event.target.value }).catch(() => undefined);
               },
             },
               ['auto', 'zh', 'en', 'yue', 'ja', 'ko'].map((code) =>
@@ -3037,6 +3074,11 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
       // ── tab: advanced — the TTS service, the microphone, and the two
       // housekeeping sections: diagnostics with the dependency audit, and the
       // version check.
+      // A new provider needs an id the Host will accept; an existing one has
+      // its id already and cannot change it.
+      const providerFormReady = providerForm === null
+        ? false
+        : providerForm.existing === true || PROVIDER_ID_PATTERN.test(providerForm.id.trim());
       const providerFormView = providerForm === null ? null : h('details', {
         style: styles.section,
         open: true,
@@ -3051,7 +3093,14 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
             disabled: providerForm.existing === true,
             onChange: (event) => setProviderForm({ ...providerForm, id: event.target.value }),
           })),
-        providerForm.existing === true ? null : h('div', { style: styles.note }, t('providerIdHint')),
+        providerForm.existing === true
+          ? null
+          : h('div', { style: styles.note }, t('providerIdHint'),
+            // The id becomes a key in the stored map, so it is checked before
+            // the request is made rather than after it comes back refused.
+            PROVIDER_ID_PATTERN.test(providerForm.id.trim())
+              ? null
+              : h('div', { style: { color: '#e8a33d', marginTop: 3 } }, t('providerIdInvalid'))),
         h('div', { style: styles.row }, h('span', { style: styles.label }, t('providerLabel')),
           h('input', {
             style: { ...styles.field, flex: 1, minWidth: 0 },
@@ -3111,7 +3160,11 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
             onChange: (event) => setProviderForm({ ...providerForm, clone: event.target.checked }),
           })),
         h('div', { style: { margin: '8px 0 2px', display: 'flex', gap: 8 } },
-          h(Button, { className: 'dshv-primary', disabled: busy !== null, onClick: saveProvider }, t('save')),
+          h(Button, {
+            className: 'dshv-primary',
+            disabled: busy !== null || !providerFormReady,
+            onClick: saveProvider,
+          }, t('save')),
           h(Button, { style: styles.knob, onClick: () => setProviderForm(null) }, t('close'))),
       );
 
@@ -3145,7 +3198,7 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
         h('div', { style: styles.section },
           h('div', { style: styles.sectionHead }, h('span', null, t('providerSection'))),
           h('div', { style: styles.note }, t('providerHint')),
-          h('div', { style: styles.row },
+          h('div', { style: { ...styles.row } },
             h('select', {
               style: { ...styles.field, flex: 1 },
               value: config.provider ?? 'mimo',
@@ -3154,6 +3207,20 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
                 await refreshState();
               }),
             }, providerList.map((entry) => h('option', { key: entry.id, value: entry.id }, entry.label))),
+            // A custom provider can be removed again; a built-in one cannot,
+            // because it is the fallback the plugin falls back to.
+            selectedProvider && selectedProvider.builtin !== true
+              ? h(Button, {
+                style: styles.knob,
+                disabled: busy !== null,
+                onClick: () => void withBusy('删除服务', async () => {
+                  const payload = await client.deleteProvider(selectedProvider.id);
+                  setProviders(payload.providers ?? []);
+                  setProviderForm(null);
+                  await refreshState();
+                }),
+              }, t('providerDelete'))
+              : null,
           ),
           h('div', { style: { margin: '6px 0 2px', display: 'flex', gap: 8, flexWrap: 'wrap' } },
             h(Button, {
@@ -3274,6 +3341,9 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
             : null,
           update !== null && update.install?.error
             ? h('div', { style: styles.error }, `${t('updateFailed')}：${update.install.error}`)
+            : null,
+          update !== null && update.install?.applied === true
+            ? h('div', { style: styles.note }, t('updateDone'))
             : null,
           update !== null && update.install?.manual
             ? h('div', { style: styles.note }, `${t('updateManual')}：${update.install.manual}`)

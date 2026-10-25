@@ -11,14 +11,14 @@
  * unregisters the route and kills the worker without leaving a listener behind.
  */
 import path from 'node:path';
-import { defaultDataRoot, expandPath, log, readJson, writeJsonAtomic } from './lib/util.js';
+import { defaultDataRoot, expandPath, fail, log, readJson, warn, writeJsonAtomic } from './lib/util.js';
 import { inspectAssets, prepareAssets, resolveAssets } from './lib/assets.js';
 import { SttService } from './lib/stt.js';
 import { createVoiceRoutes } from './lib/routes.js';
 import { anchorList, probeModule, setModuleAnchors } from './lib/sherpa.js';
-import { BUILTIN_PROVIDERS, normalizeProviders, resolveProvider } from './lib/tts.js';
+import { BUILTIN_PROVIDERS, mergeProviderRecord, normalizeProviders, resolveProvider } from './lib/tts.js';
 import { UpdateChecker, readPluginVersion } from './lib/version.js';
-import { applyPersona } from './lib/persona.js';
+import { registerPersona, DEFAULT_PERSONA } from './lib/persona.js';
 import { auditDependencies, installDependency, readManifest } from './lib/deps.js';
 
 /** Services the Host half needs before it may register anything. */
@@ -26,6 +26,18 @@ export const inject = ['webServer'];
 
 /** The path this plugin owns on the DSH web server. */
 const ROUTE_PATH = '/dsh-voice';
+
+/**
+ * The only installation source this plugin will hand to the plugin manager.
+ *
+ * The value arrives in a request body, and the plugin manager would install
+ * and enable whatever it names. Only this project's own tagged releases are
+ * accepted.
+ */
+const RELEASE_SPEC_PATTERN = /^github:HimaCSR\/dsh-voice-chat@v\d+\.\d+\.\d+$/;
+
+/** Provider ids are file- and log-safe: letters, digits, dots and dashes. */
+const PROVIDER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 /** Baseline configuration; every field is overridable from the bundle patch. */
 const DEFAULTS = {
@@ -71,8 +83,10 @@ const DEFAULTS = {
     apiKey: null,
     apiKeyEnv: 'MIMO_API_KEY',
     // The conversation persona, injected into the harness system prompt. It
-    // shapes what the assistant says — not how the voice sounds.
-    persona: '',
+    // shapes what the assistant says — not how the voice sounds. The default
+    // is the one the plugin was asked for: one question, one answer, and a
+    // summary when the answer would be long. Clearing the field turns it off.
+    persona: DEFAULT_PERSONA,
     // Custom provider records, keyed by provider id.
     providers: {},
   },
@@ -182,33 +196,45 @@ export function apply(ctx, rawConfig = {}) {
   let pluginVersion = null;
   /** The dispose handle of the registered persona prompt section. */
   let personaDispose = null;
+  /** Whether the persona reached the system prompt, and why not if it did not. */
+  const personaState = { applied: false, reason: '尚未注册' };
   /** The most recent dependency audit, refreshed on demand. */
   let depsReport = null;
   /** The state of the running dependency installation, if any. */
   let depsInstall = null;
   /** The update checker, holding the cached release lookup. */
   const updateChecker = new UpdateChecker({ manifestUrl: config.update?.manifestUrl ?? '' });
+  /** The tail of the configuration queue; see `enqueueConfig`. */
+  let configTail = Promise.resolve();
 
   /**
    * Register the conversation persona as a system prompt section.
    *
-   * The persona is replaced rather than appended to, so changing it takes
-   * effect without a restart.
+   * This runs once, while the plugin is being applied. The section's text
+   * is read from the live configuration every time the harness assembles a
+   * prompt, so an edit takes effect on the next reply without touching the
+   * registration.
+   *
+   * Nothing here may throw: this runs while the host is booting, and an
+   * exception here would be a fatal load failure that leaves the user with
+   * no application at all. A persona that cannot be placed is logged and
+   * skipped; the rest of the plugin keeps working.
    */
-  function onPersonaChanged(persona) {
-    if (personaDispose) {
-      try {
-        personaDispose();
-      } catch {
-        // The section is already gone.
-      }
-      personaDispose = null;
+  function registerConversationPersona() {
+    let result;
+    try {
+      result = registerPersona(ctx, () => config.tts.persona ?? '');
+    } catch (error) {
+      result = { applied: false, reason: `人设注入异常：${error?.message ?? error}`, dispose: null };
     }
-    const result = applyPersona(ctx, persona);
     if (result.applied) {
       personaDispose = result.dispose;
+      personaState.applied = true;
+      personaState.reason = null;
       log('conversation persona registered');
     } else {
+      personaState.applied = false;
+      personaState.reason = result.reason;
       log(`conversation persona not applied: ${result.reason}`);
     }
     return result;
@@ -227,8 +253,12 @@ export function apply(ctx, rawConfig = {}) {
     }
     assets = await inspectAssets(config, { verify: false }).catch(() => null);
     pluginVersion = await readPluginVersion();
-    if (config.tts.persona) onPersonaChanged(config.tts.persona);
     return assets;
+  }).catch((error) => {
+    // The boot sequence must not fail as a whole: without the model report
+    // the settings panel says "not prepared" and the user can still fix it.
+    log(`startup preparation failed: ${error?.message ?? error}`);
+    return null;
   });
 
   const stt = new SttService(config, () => resolveAssets(config));
@@ -243,19 +273,30 @@ export function apply(ctx, rawConfig = {}) {
   function describeConfig() {
     const { providers, currentId } = normalizeProviders(config);
     const selected = providers[currentId] ?? null;
+    // The key state is reported for the provider that is actually in use.
+    // Reading the old flat fields instead would say "no key" while the
+    // selected provider has one of its own.
+    const hasStoredKey = typeof selected?.apiKey === 'string' && selected.apiKey.length > 0;
+    const hasEnvKey = Boolean(selected?.apiKeyEnv && process.env[selected.apiKeyEnv]);
     return {
       provider: currentId,
       model: selected?.model ?? config.tts.model,
       cloneModel: selected?.cloneModel ?? config.tts.cloneModel,
       baseUrl: selected?.baseUrl ?? config.tts.baseUrl,
-      voice: config.tts.voice,
+      voice: selected?.voice ?? config.tts.voice,
       format: selected?.format ?? config.tts.format,
-      hasKey: typeof config.tts.apiKey === 'string' && config.tts.apiKey.length > 0
-        ? true
-        : Boolean(process.env[config.tts.apiKeyEnv] || process.env.MIMO_API_KEY),
-      keySource: typeof config.tts.apiKey === 'string' && config.tts.apiKey.length > 0 ? 'settings' : 'environment',
+      hasKey: hasStoredKey || hasEnvKey,
+      keySource: hasStoredKey ? 'settings' : hasEnvKey ? 'environment' : 'none',
       language: config.stt.language,
+      // The tone instruction, so the settings panel can show what is in
+      // effect instead of an empty box that would overwrite it on save.
+      instruction: selected?.instruction ?? config.tts.instruction ?? '',
       persona: config.tts.persona ?? '',
+      // Whether the persona actually reached the system prompt, and why not
+      // if it did not: a persona that silently fails to register looks
+      // exactly like a persona the model is ignoring.
+      personaApplied: personaState.applied,
+      personaReason: personaState.reason,
       sttBackend: 'sensevoice-small',
       precision: config.stt.precision,
       vadBackend: assets?.vad?.backend ?? config.stt.vadBackend,
@@ -310,32 +351,39 @@ export function apply(ctx, rawConfig = {}) {
    */
   async function updateProvider(action, record) {
     const id = typeof record?.id === 'string' ? record.id.trim() : '';
-    if (id === '') throw new Error('缺少供应商 id');
+    if (id === '') throw fail('bad-request', '缺少供应商 id');
+    // The id becomes a key in the stored map and is written into the log, so
+    // it is restricted to characters that are safe in both.
+    if (!PROVIDER_ID_PATTERN.test(id)) {
+      throw fail('bad-request', '供应商 id 只能包含字母、数字、点和短横线，且以字母或数字开头');
+    }
+    return enqueueConfig(async () => {
     const { providers, currentId } = normalizeProviders(config);
     const existing = providers[id] ?? null;
     if (action === 'delete') {
-      if (existing?.builtin) throw new Error(`内置供应商「${existing.label ?? id}」不能删除`);
+      if (existing?.builtin) throw fail('bad-request', `内置供应商「${existing.label ?? id}」不能删除`);
       const next = { ...(config.tts.providers ?? {}) };
       delete next[id];
-      await updateConfig({ providers: next });
-      if (currentId === id) await updateConfig({ provider: 'mimo' });
+      // The selection falls back to MiMo when the provider in use is removed.
+      await applyConfigPatch(currentId === id ? { providers: next, provider: 'mimo' } : { providers: next });
       log(`provider removed: ${id}`);
       return describeProviders();
     }
     const kind = record.kind ?? existing?.kind ?? 'openai-speech';
     if (!['mimo', 'openai-speech', 'dev-tone'].includes(kind)) {
-      throw new Error(`不支持的供应商类型：${kind}`);
+      throw fail('bad-request', `不支持的供应商类型：${kind}`);
     }
     const builtin = BUILTIN_PROVIDERS.find((entry) => entry.id === id) ?? null;
     const next = { ...(config.tts.providers ?? {}) };
-    const merged = { ...(existing ?? builtin ?? {}), ...record, id, kind };
-    // A blank key field clears the stored key instead of storing an empty one.
-    if (typeof merged.apiKey === 'string' && merged.apiKey.trim() === '') merged.apiKey = null;
-    else if (typeof merged.apiKey === 'string') merged.apiKey = merged.apiKey.trim();
+    // Only the known fields are written. The request comes from a browser form,
+    // and spreading it wholesale would store its bookkeeping — and whatever
+    // else it happens to carry — into the configuration file.
+    const merged = mergeProviderRecord(existing ?? builtin ?? {}, record, id, kind);
     next[id] = merged;
-    await updateConfig({ providers: next });
+    await applyConfigPatch({ providers: next });
     log(`provider saved: ${id}`);
     return describeProviders();
+    });
   }
 
   /** The voice the UI should use when it does not send one explicitly. */
@@ -359,8 +407,28 @@ export function apply(ctx, rawConfig = {}) {
     recentStt.length = Math.min(recentStt.length, 8);
   }
 
-  /** Apply a settings patch, persist it, and return the new summary. */
-  async function updateConfig(patch) {
+  /**
+   * Serialize the configuration writes.
+   *
+   * Reading the current state, changing it and writing it back is three
+   * steps, and the write yields to the event loop. Two requests arriving
+   * together would both read the same old state, and the second write would
+   * silently drop the first one's change. Running the whole sequence in a
+   * queue keeps the updates in order.
+   */
+  function enqueueConfig(task) {
+    const run = configTail.then(task, task);
+    configTail = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  /**
+   * Apply a settings patch, persist it, and return the new summary.
+   *
+   * This is the inner half; it expects the caller to already hold the
+   * configuration queue. `updateConfig` is the entry point for everyone else.
+   */
+  async function applyConfigPatch(patch) {
     const next = {};
     for (const [key, dotted] of Object.entries(MUTABLE)) {
       if (patch[key] === undefined) continue;
@@ -386,8 +454,13 @@ export function apply(ctx, rawConfig = {}) {
     await writeJsonAtomic(overridesPath, overrides);
     if (next.voice !== undefined) log(`default voice set to ${String(next.voice)}`);
     if (next.provider !== undefined) log(`tts provider set to ${String(next.provider)}`);
-    if (next.persona !== undefined) onPersonaChanged(String(next.persona ?? ''));
+    if (next.persona !== undefined) log('conversation persona updated');
     return describeConfig();
+  }
+
+  /** Apply a settings patch, persist it, and return the new summary. */
+  function updateConfig(patch) {
+    return enqueueConfig(() => applyConfigPatch(patch));
   }
 
   /** Current background-preparation state. */
@@ -421,18 +494,31 @@ export function apply(ctx, rawConfig = {}) {
    * state endpoint rather than holding the request open.
    */
   function startDependencyInstall(name, range) {
-    if (depsInstall?.running) throw new Error('已有依赖正在安装');
-    if (typeof name !== 'string' || !/^[a-z0-9@._/-]+$/i.test(name)) {
-      throw new Error('依赖名不合法');
+    if (depsInstall?.running) throw fail('conflict', '已有依赖正在安装');
+    // The name is an npm package name. A leading dash would let it be read
+    // as an option by the package manager rather than as a package.
+    if (typeof name !== 'string' || !/^(?:@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/i.test(name)) {
+      throw fail('bad-request', '依赖名不合法');
     }
-    const manifest = null;
-    void manifest;
+    // The range becomes part of the spec handed to pnpm, so it is checked as
+    // strictly as the name: a version, and nothing that could point at
+    // another location.
+    const wanted = typeof range === 'string' ? range.trim() : '';
+    if (wanted !== '' && !/^(?:\^|~|>=|<=|>|<|=)?\d+(?:\.\d+){0,2}(?:-[0-9A-Za-z.-]+)?(?:\s*\|\|\s*(?:\^|~|>=|<=|>|<|=)?\d+(?:\.\d+){0,2}(?:-[0-9A-Za-z.-]+)?)*$/.test(wanted)) {
+      throw fail('bad-request', '版本范围不合法');
+    }
     depsInstall = installDependency({
       name,
-      range: typeof range === 'string' ? range.trim() : '',
+      range: wanted,
       profileDir: profile?.dir ?? '',
+      // The harness knows which package manager it ships with; that one is
+      // used rather than a guess at where it lives.
+      packageManager: profile?.packageManager ?? null,
       onState: (state) => {
         depsInstall = state;
+        // A finished install changes what is on disk, so the cached audit is
+        // stale from that moment on.
+        if (state?.phase === 'done' || state?.error) depsReport = null;
       },
     });
     return { ...depsInstall };
@@ -452,7 +538,9 @@ export function apply(ctx, rawConfig = {}) {
   async function checkForUpdate() {
     const current = pluginVersion ?? (await readPluginVersion());
     pluginVersion = current;
-    return updateChecker.check(current);
+    // The custom source is read at lookup time, not at construction: the
+    // checker is created once, but the setting may change later.
+    return updateChecker.check(current, config.update?.manifestUrl ?? '');
   }
 
   /**
@@ -466,24 +554,40 @@ export function apply(ctx, rawConfig = {}) {
    * @param signal - an abort signal, as the service requires.
    */
   async function installRelease(spec, signal) {
+    // The installation source is not taken on trust: the request body could
+    // name any package, and the plugin manager would install and enable it.
+    // Only this project's own releases are installable here.
+    const source = String(spec ?? '').trim();
+    if (!RELEASE_SPEC_PATTERN.test(source)) {
+      throw fail('bad-request', `只允许安装本项目的发布版（${RELEASE_SPEC_PATTERN.source}）`);
+    }
     const manager = ctx.get('pluginManager');
     if (!manager || typeof manager.installBundle !== 'function') {
       return {
         applied: false,
         error: '当前运行时没有插件管理服务，无法自动安装',
-        manual: `dsh plugin --profile desktop add ${spec}`,
+        manual: `dsh plugin --profile desktop add ${source}`,
       };
     }
     try {
-      const result = await manager.installBundle(spec, { enabled: true, signal });
+      const result = await manager.installBundle(source, { enabled: true, signal });
       log(`update install finished: ${JSON.stringify(result?.application ?? result)}`);
-      return result;
+      // The manager's own answer is passed on, with a plain marker added so
+      // the panel can tell a finished install from a failed one.
+      const payload = result && typeof result === 'object' ? { ...result } : {};
+      return { ...payload, applied: true };
     } catch (error) {
-      warn(`update install failed: ${error.message}`);
+      // The error path must not be able to fail itself: a throw here would
+      // replace the real reason with something far less useful.
+      try {
+        warn(`update install failed: ${error?.message ?? error}`);
+      } catch {
+        // Nothing left to do but report the failure to the caller.
+      }
       return {
         applied: false,
-        error: error.message,
-        manual: `dsh plugin --profile desktop add ${spec}`,
+        error: String(error?.message ?? error),
+        manual: `dsh plugin --profile desktop add ${source}`,
       };
     }
   }
@@ -537,6 +641,14 @@ export function apply(ctx, rawConfig = {}) {
       log('routes removed');
     };
   }, 'voice-chat: http routes');
+
+  // The persona section is registered here, while the plugin is being
+  // applied and the context is still alive. Registering it later — from the
+  // asynchronous startup path — either collides with the built-in persona
+  // section or creates an effect on a context that is already gone, and the
+  // host treats both as a fatal load failure: the application would refuse
+  // to start at all.
+  registerConversationPersona();
 
   ctx.effect(() => () => {
     stt.dispose();

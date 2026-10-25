@@ -176,9 +176,18 @@ $P    = "<本仓库同级>\probe"
 `session.prompt` 的 content schema 只允许 `text` / `image` / `file`，**没有 system 角色**。
 所以人设走 `ctx.get('systemPrompt').section({ name, order, text })`：
 
-- 段落名固定为 `deployment:persona-suffix`（**同名即替换**，不是追加），所以改人设不用重启。
-- `order` 取 `systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_SUFFIX')`（当前是 10200）。
+- **段落名必须是插件自己的名字**（现在是 `voice-chat:persona-suffix`）。同一层里重名的段落会被
+  直接拒绝：`prompt section "..." is already registered`，宿主把它当**致命加载失败** ——
+  DSH 启动即退出，必须禁用本插件才能进得去。内置的 `deployment:persona-suffix` 归
+  `@deepseek-ai/dsh-persona` 所有，不要碰。
+- **`order` 取 `systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_SUFFIX') + 1`**（内置是 10200，
+  自己那份排它后面），于是更具体的那段最后被读到。
+- **必须在插件被应用的同步阶段注册**。在异步回调里注册会撞上
+  `cannot create effect on inactive context`，同样是致命加载失败。
+- **段落的 `text` 传函数，不传字符串**。提示词每次组装时才求值，所以改人设下一句就生效，
+  不用重新注册（重新注册会撞上重名拒绝）。
 - 插件卸载时要 dispose 这个 section，否则段落会留在提示里。
+- 注册失败只降级、不抛出：`/state` 的 `personaApplied` / `personaReason` 会如实说明。
 
 ### 版本更新不架服务器
 
@@ -186,17 +195,34 @@ $P    = "<本仓库同级>\probe"
 匿名调 GitHub 只有 **60 次/小时**，所以结果按小时缓存（`UpdateChecker`），而且每次请求都带超时。
 取不到就如实说取不到，**不猜版本号**。
 
+### 扁平字段只归 MiMo
+
+`tts.baseUrl` / `tts.model` / `tts.apiKey` / `tts.apiKeyEnv` 这些扁平字段是 1.0.x 时代只有
+MiMo 一个供应商时留下的，**它们只属于 MiMo**（`LEGACY_PROVIDER_ID = 'mimo'`）。
+
+- 归一化时，扁平字段只回填到 `providers.mimo`，**不回填到当前选中的供应商**。否则选中
+  OpenRouter 就会把它的地址和模型改成 MiMo 的值。
+- 取 Key 时，**显式填的 Key 优先**；环境变量只按**该供应商自己的** `apiKeyEnv` 取，
+  `MIMO_API_KEY` / `XIAOMI_MIMO_API_KEY` 也只对 MiMo 生效。跨供应商回落等于把 A 的 Key
+  发给 B 的接口。
+- `apiKeyEnv` 只接受一份固定名单（`ALLOWED_API_KEY_ENV`），别让用户填任意环境变量名 ——
+  那等于让宿主把自己的环境变量读出来发给对方。
+
 ### 依赖审查与安装：别用 `pluginManager.installBundle`
 
 它只接受 bundle：`manifest?.dsh?.bundle === undefined` 会抛 `not-bundle`，而且**会回滚**
 `package.json` 与 `pnpm-lock.yaml`。装普通依赖要直接调 DSH 自带的 pnpm：
 
-```
-<DSH_HOME>\dsh-runtimes\dsh-primary-runtime\dependencies\pnpm\bin\pnpm.cjs
-```
+1. **首选 `profileContext.packageManager`**（`{ command, args, env }`）—— DSH 知道自己带的是
+   哪个 pnpm，比猜路径可靠。
+2. 猜路径时用 `lib/deps.js` 的 `pnpmCandidates()`。**布局变过好几轮**，现在至少要覆盖：
+   - `<DSH_HOME>\dsh-runtimes\dsh-primary-runtime\dependencies\pnpm\bin\pnpm.cjs`
+   - `<resourcesPath>\runtime\primary-runtime\dependencies\pnpm\bin\pnpm.{cjs,mjs}`
+   - `<resourcesPath>\runtime\pnpm\bin\pnpm.{cjs,mjs}`
 
 （`pnpm` **不在 PATH** 上。）装到当前 profile 目录，用 `process.execPath` 起进程、
-`ELECTRON_RUN_AS_NODE=1`，参考 `lib/stt.js` 起 worker 的写法。
+`ELECTRON_RUN_AS_NODE=1`，参考 `lib/stt.js` 起 worker 的写法。**必须设超时并杀掉子进程**，
+否则一次卡死就让安装功能永久锁死。
 
 ---
 
