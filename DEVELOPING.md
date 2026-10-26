@@ -106,7 +106,7 @@
 
 ---
 
-## 3. 验证：6 个脚本，各有各的跑法
+## 3. 验证：7 个脚本，各有各的跑法
 
 ```powershell
 $node = "$env:DSH_HOME\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe"
@@ -122,11 +122,12 @@ $P    = "<本仓库同级>\probe"
 
 | 脚本（在 `probe/verify/`） | 运行时 | 覆盖 | 期望 |
 |---|---|---|---|
-| `unit-tests.mjs` | 普通 node | CMVN 夹具、fbank、WAV 往返、端点状态机、TTS 请求形状、**客户端 `apply()` 注册 seat**、**胶球几何**、供应商归一化、版本比较、依赖区间 | 36/36 |
+| `unit-tests.mjs` | 普通 node | CMVN 夹具、fbank、WAV 往返、端点状态机、TTS 请求形状、**客户端 `apply()` 注册 seat**、**胶球几何**、供应商归一化、版本比较、依赖区间、人设段落、跨供应商 Key 隔离、限流退避、**上游回显凭据打码** | 79/79 |
 | `http-tests.mjs` | 普通 node | 真实回环服务器：越权、状态码、克隆计划、dev-tone、供应商增删查、依赖审查、版本检查 | 22/22 |
 | `manifest-check.mjs` | **Electron-as-node**（要 DSH 里的 js-yaml） | 清单/patch/相对 import 一致性 | `consistent` |
 | `worker-e2e.mjs` | **Electron-as-node**（sherpa 在 app.asar 里） | 真模型转写 + 噪声/静音拒识 + **降级路径** | 7/7 |
-| `live-verify.mjs` | **Electron-as-node** | 打运行中的 GUI，18 项含真 MiMo 合成 | 18/18 |
+| `live-verify.mjs` | **Electron-as-node** | 打运行中的 GUI，24 项含真 MiMo 合成、**profile 没把插件目录设成热重载监听根** | 24/24 |
+| `broadcast-verify.mjs` | **Electron-as-node** | **播报行为**：只读首尾句、settle 时首句不重复读、同句重复读两次、小数/版本/缩写不切错、四种模式、未知模式回落。import 的是**真的 `client.js`** | 9/9 |
 | `firered-spike.mjs` | 普通 node + `$env:DSH_VOICE_MODULE_DIR=<profile>` | FireRedVAD 数值闸门（语音 vs 噪声 vs 静音） | PASS |
 | `vad-backends.mjs` | **Electron-as-node** | 子进程逐个验 ten/silero 是否可用——sherpa 模型不对时会 `exit(-1)`，只能靠子进程观察 | 见输出 |
 
@@ -140,7 +141,9 @@ $P    = "<本仓库同级>\probe"
   > （截图工具抓不到运动中的画面，这一招抓出过两个真问题）。再加 `?skin=dark` 看暗色。
 - `live-verify.mjs`：它同时验证「浏览器半区已注册为 client module」。
 
-**省 token 的跑法**：只改 `client.js` 时跑 `unit-tests` + `live-verify` 就够，**不要每次全跑 5 套**；输出只取 `Select-Object -Last 3`，别把整篇日志倒进对话。
+**省 token 的跑法**：只改 `client.js` 时跑 `unit-tests` + `broadcast-verify` + `live-verify` 就够，**不要每次全跑 7 套**；输出只取 `Select-Object -Last 3`，别把整篇日志倒进对话。
+
+**动了播报逻辑**（切句、选句、朗读队列）**必须**跑 `broadcast-verify.mjs` —— 它 import 的是真的 `client.js`，把「只读首尾句」这件事钉死成门禁。
 
 ---
 
