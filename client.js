@@ -128,6 +128,35 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * The reason an error response carries.
+     *
+     * The two calls that can fail — recognition and synthesis — read the same
+     * shape, so they read it the same way: the host's own words when it gave
+     * any, the status otherwise, and the prefix says which call it was.
+     *
+     * @param {Response} response - the response that was not okay.
+     * @param {string} prefix - what the call is called, e.g. `TTS`.
+     * @returns {Promise<string>} the message to show the user.
+     */
+    async function readError(response, prefix) {
+      const label = String(prefix ?? 'HTTP');
+      const body = await response.text();
+      let reason = '';
+      try {
+        const parsed = JSON.parse(body);
+        if (typeof parsed?.error === 'string') reason = parsed.error;
+        else if (typeof parsed?.error?.message === 'string') reason = parsed.error.message;
+        else if (typeof parsed?.message === 'string') reason = parsed.message;
+      } catch {
+        // Not JSON: the host answered with something else entirely.
+      }
+      if (reason === '') reason = body.slice(0, 200).trim();
+      return reason === ''
+        ? `${label} HTTP ${response.status}`
+        : `${label} HTTP ${response.status}: ${reason}`;
+    }
+
     const api = {
       /** Engine readiness, TTS provider facts and the voice catalogue. */
       async state() {
@@ -141,7 +170,7 @@ window.__ModuleLoader__.load({
           headers: { 'content-type': 'application/octet-stream' },
           body: pcm16,
         });
-        if (!response.ok) throw new Error((await asJson(response)).error ?? `STT HTTP ${response.status}`);
+        if (!response.ok) throw new Error(await readError(response, 'STT'));
         return asJson(response);
       },
       /**
@@ -174,16 +203,9 @@ window.__ModuleLoader__.load({
           signal,
         });
         if (!response.ok) {
-          const body = await response.text();
-          let reason = `TTS HTTP ${response.status}`;
-          try {
-            const parsed = JSON.parse(body);
-            if (parsed?.error) reason = parsed.error;
-          } catch {
-            // Not JSON: the host answered with something else entirely.
-            reason = `TTS HTTP ${response.status}: ${body.slice(0, 200)}`;
-          }
-          const error = new Error(reason);
+          // The same reader as the recognizer: the host's own words when it
+          // gave any, the status otherwise.
+          const error = new Error(await readError(response, 'TTS'));
           error.status = response.status;
           throw error;
         }
@@ -192,9 +214,6 @@ window.__ModuleLoader__.load({
       /** Download the pinned local models; resolves when the run finishes. */
       async prepare() {
         return asJson(await fetch(`${BASE}/prepare`, { method: 'POST' }));
-      },
-      async voices() {
-        return asJson(await fetch(`${BASE}/voices`));
       },
       async saveVoice(payload) {
         const response = await fetch(`${BASE}/voices`, {
@@ -313,7 +332,10 @@ window.__ModuleLoader__.load({
         const bins = Math.max(1, Math.round(this.analyserData.length * 0.35));
         let sum = 0;
         for (let index = 0; index < bins; index += 1) sum += this.analyserData[index];
-        return Math.min(1, sum / bins / 180);
+        // The analyser hands out bytes, and 255 is the loudest of them.
+        // Dividing by less than that made the bead look as if it were
+        // shouting long before the voice did.
+        return Math.min(1, sum / bins / 255);
       }
 
       subscribe(listener) {
@@ -741,6 +763,46 @@ registerProcessor('voice-chat-mic', MicCapture);
     const TERMINATORS = new Set(['。', '！', '？', '!', '?', '…']);
 
     /**
+     * The abbreviations whose full stop does not end a sentence.
+     *
+     * `Mr. Smith` is one sentence, not two: the full stop belongs to the
+     * title, and the words after it carry on. The list is short on purpose —
+     * it holds the forms that actually turn up in a reply.
+     */
+    const ABBREVIATIONS = new Set([
+      'mr', 'mrs', 'ms', 'dr', 'prof', 'sr', 'jr', 'st', 'vs',
+      'inc', 'ltd', 'co', 'dept', 'est', 'fig', 'vol',
+      'e.g', 'i.e', 'a.m', 'p.m', 'u.s', 'u.k', 'ph.d', 'm.d', 'b.c', 'a.d',
+    ]);
+
+    /**
+     * Whether the full stop at `index` really ends a sentence.
+     *
+     * A full stop only ends one when it is one: not a decimal point (`1.5`),
+     * not a version (`v2.0`), not an initial (`A.`) and not the mark of an
+     * abbreviation (`Mr.`). Everything else is a sentence of its own.
+     */
+    function isSentenceStop(text, index) {
+      const next = text[index + 1];
+      const before = text.slice(0, index);
+      // A digit on either side of the point makes it a decimal point.
+      if (next !== undefined && /\d/.test(next)) return false;
+      if (/\d$/.test(before) && next !== undefined && /\d/.test(next)) return false;
+      const word = /([A-Za-z][A-Za-z.]*)$/.exec(before);
+      if (word !== null) {
+        const token = word[1];
+        const lower = token.toLowerCase();
+        // A title or a written-out abbreviation.
+        if (ABBREVIATIONS.has(lower)) return false;
+        // An initial: `A. Smith` is one name, not two sentences.
+        if (token.length === 1) return false;
+        // An initialism: `U.S.A.` is one word, not three sentences.
+        if (/^(?:[A-Za-z]\.)+[A-Za-z]?$/.test(token)) return false;
+      }
+      return true;
+    }
+
+    /**
      * The last reply that was already finished when the plugin mounted.
      *
      * This is the line between history and something new, and it has to
@@ -763,29 +825,61 @@ registerProcessor('voice-chat-mic', MicCapture);
       return anchor;
     }
 
+    /** Whether a finished sentence carries nothing worth speaking. */
     function isTrivial(sentence) {
       if (sentence.length <= 1) return true;
       return !/[\u4e00-\u9fff0-9a-zA-Z]/.test(sentence);
+    }
+
+    /**
+     * Whether a chunk is nothing but punctuation.
+     *
+     * A finished sentence has to be a sentence, but the tail of a reply that
+     * is still being written may be a single character: `这` is the beginning
+     * of a word, and throwing it away would cut short the sentence the user
+     * is listening to. Only the punctuation around it is noise.
+     */
+    function isPunctuationOnly(text) {
+      return !/[\u4e00-\u9fff0-9a-zA-Z]/.test(text);
     }
 
     /** Split a reply into complete sentences plus a trailing partial chunk. */
     function splitSentences(text) {
       const sentences = [];
       let buffer = '';
-      for (const character of text) {
+      for (let index = 0; index < text.length; index += 1) {
+        const character = text[index];
         buffer += character;
-        if (TERMINATORS.has(character)) {
-          const trimmed = buffer.trim();
-          if (trimmed !== '' && !isTrivial(trimmed)) sentences.push(trimmed);
-          buffer = '';
-        }
+        // A full stop ends a sentence only when it really is one: a decimal
+        // point, a version number and an abbreviation are not sentence ends.
+        const stop = TERMINATORS.has(character)
+          || (character === '.' && isSentenceStop(text, index));
+        if (!stop) continue;
+        const trimmed = buffer.trim();
+        if (trimmed !== '' && !isTrivial(trimmed)) sentences.push(trimmed);
+        buffer = '';
       }
       const partial = buffer.trim();
-      return { sentences, partial: partial === '' || isTrivial(partial) ? null : partial };
+      return { sentences, partial: partial === '' || isPunctuationOnly(partial) ? null : partial };
     }
 
     /**
-     * Choose the sentences that are actually spoken.
+     * The identity of one sentence inside one reply.
+     *
+     * The same words can appear twice in one reply, so the place is part of
+     * the identity: `好。` at the front and `好。` at the back are two
+     * different sentences, and both of them are read out. The place also
+     * keeps the opening sentence from being read a second time when the reply
+     * settles and its closing sentence joins the list — the closing one is
+     * appended, so the sentences in front of it keep their place.
+     */
+    function sentenceKey(sentence, index) {
+      return `${index}::${sentence}`;
+    }
+
+    /**
+     * Choose the sentences that are actually spoken, with the place each one
+     * holds.
      *
      * The default reads only the opening and the closing sentence. A reply
      * is usually longer than it needs to be, and reading all of it out loud
@@ -796,36 +890,126 @@ registerProcessor('voice-chat-mic', MicCapture);
      * @param {string[]} speakable - the sentences of the reply, in order.
      * @param {string} mode - one of head-tail, all, head, tail.
      * @param {boolean} settled - whether the reply has finished streaming.
-     * @param {Set<string>} spoken - the sentences already spoken.
-     * @returns {string[]} the sentences to speak now.
+     * @param {Set<string>} spoken - what was already spoken: the keys this
+     *        version writes, and the plain sentences as well.
+     * @returns {{key: string, index: number, text: string}[]} the sentences to
+     *          speak now.
      */
-    function pickSpoken(speakable, mode, settled, spoken) {
+    function pickEntries(speakable, mode, settled, spoken) {
       if (speakable.length === 0) return [];
       // An unknown mode falls back to the default rather than saying
       // nothing: the mode comes from the configuration file, and a value
       // this version does not know should still leave the user hearing the
       // reply instead of silence.
       const choice = ['all', 'head', 'tail', 'head-tail'].includes(mode) ? mode : 'head-tail';
-      // A one-sentence reply is both the first and the last sentence, so the
-      // choice is collected through one place that refuses to say the same
-      // sentence twice.
+      const known = spoken ?? new Set();
       const out = [];
-      const take = (sentence) => {
-        if (sentence === undefined || spoken.has(sentence) || out.includes(sentence)) return;
-        out.push(sentence);
+      const picked = new Set();
+      const take = (sentence, index) => {
+        if (sentence === undefined) return;
+        const key = sentenceKey(sentence, index);
+        // The same words twice in one reply are two sentences: only the very
+        // same one — same place, same words — is refused.
+        if (picked.has(key)) return;
+        if (known.has(key) || known.has(sentence)) return;
+        picked.add(key);
+        out.push({ key, index, text: sentence });
       };
       if (choice === 'all') {
-        speakable.forEach(take);
+        speakable.forEach((sentence, index) => take(sentence, index));
         return out;
       }
       const first = speakable[0];
       const last = speakable[speakable.length - 1];
-      if (choice === 'head' || choice === 'head-tail') take(first);
+      if (choice === 'head' || choice === 'head-tail') take(first, 0);
       // The closing sentence is only known once the reply has settled.
       if (choice === 'tail' || choice === 'head-tail') {
-        if (settled) take(last);
+        if (settled) take(last, speakable.length - 1);
       }
       return out;
+    }
+
+    /**
+     * Choose the sentences that are actually spoken.
+     *
+     * @param {string[]} speakable - the sentences of the reply, in order.
+     * @param {string} mode - one of head-tail, all, head, tail.
+     * @param {boolean} settled - whether the reply has finished streaming.
+     * @param {Set<string>} spoken - what was already spoken.
+     * @returns {string[]} the sentences to speak now.
+     */
+    function pickSpoken(speakable, mode, settled, spoken) {
+      return pickEntries(speakable, mode, settled, spoken).map((entry) => entry.text);
+    }
+
+    /** How often one sentence may be tried at most. */
+    const MAX_SPEECH_ATTEMPTS = 2;
+
+    /** How long a failed sentence waits before it is tried again. */
+    const SPEECH_RETRY_DELAY_MS = 5000;
+
+    /**
+     * The record of a sentence that is on its way to the speaker.
+     *
+     * @param {object} [entry] - what was known about the sentence before.
+     */
+    function pendingState(entry) {
+      return { state: 'pending', attempts: entry?.attempts ?? 0, notBefore: 0 };
+    }
+
+    /**
+     * The record of a sentence that was read out.
+     *
+     * @param {object} [entry] - what was known about the sentence before.
+     */
+    function spokenState(entry) {
+      return { state: 'spoken', attempts: (entry?.attempts ?? 0) + 1, notBefore: 0 };
+    }
+
+    /**
+     * The record of a sentence that failed.
+     *
+     * A failure is not the end of the sentence: the service may have been
+     * busy for a moment, and the sentence is worth reading out once it
+     * answers again. The tries are counted, so a sentence that keeps failing
+     * is not retried for ever.
+     *
+     * @param {object} [entry] - what was known about the sentence before.
+     * @param {number} [now] - the current time.
+     */
+    function failedState(entry, now = Date.now()) {
+      const attempts = (entry?.attempts ?? 0) + 1;
+      return {
+        state: 'failed',
+        attempts,
+        notBefore: now + SPEECH_RETRY_DELAY_MS,
+        exhausted: attempts >= MAX_SPEECH_ATTEMPTS,
+      };
+    }
+
+    /**
+     * The record of a sentence that was queued and then dropped.
+     *
+     * The user barged in, or the read-out was switched off: the sentence was
+     * never spoken, so it stays free to be picked up again.
+     *
+     * @param {object} [entry] - what was known about the sentence before.
+     */
+    function releasedState(entry) {
+      return { state: 'idle', attempts: entry?.attempts ?? 0, notBefore: 0 };
+    }
+
+    /**
+     * Whether a failed sentence may be tried again.
+     *
+     * @param {object} [entry] - the record of the sentence.
+     * @param {number} [now] - the current time.
+     */
+    function canRetry(entry, now = Date.now()) {
+      if (entry === undefined || entry === null) return false;
+      if (entry.state !== 'failed') return false;
+      if ((entry.attempts ?? 0) >= MAX_SPEECH_ATTEMPTS) return false;
+      return now >= (entry.notBefore ?? 0);
     }
 
     /** Strip markdown, code fences and URLs so the reader never speaks markup. */
@@ -1230,16 +1414,6 @@ registerProcessor('voice-chat-mic', MicCapture);
         gap: 8,
         fontWeight: 600,
         fontSize: 12.5,
-      },
-      diag: {
-        height: 108,
-        marginTop: 7,
-        padding: 8,
-        overflow: 'auto',
-        resize: 'vertical',
-        fontFamily: 'ui-monospace,SFMono-Regular,Consolas,monospace',
-        fontSize: 11,
-        lineHeight: 1.45,
       },
     };
 

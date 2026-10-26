@@ -460,6 +460,32 @@ update:
 
 ## 11. 文件地图
 
+### 为什么插件要挂在 DSH 的 web 服务上
+
+插件分两半，**中间隔着一条 HTTP 通道**：
+
+| | 跑在哪 | 能干什么 |
+|---|---|---|
+| **浏览器半区** `client.js` | DSH 界面所在的网页沙箱 | 画胶球、读回复文本、开麦克风、放声音 |
+| **Host 半区** `index.js` + `lib/` | DSH 主进程（Node） | 读写磁盘、跑 ONNX 模型、请求上游、装依赖 |
+
+浏览器半区里**只有** `require('react')` 这一样东西可用 —— 它跑在网页沙箱里，
+够不到文件系统、够不到 Node 的网络栈、也够不到识别模型。于是它只能**回头问宿主**。
+
+DSH 主进程自带一个 HTTP 服务（本机 `127.0.0.1`，端口每次启动都变），
+它同时干两件事：**伺服 DSH 的界面**，以及**承载插件注册的路由**。
+本插件在 `index.js` 里注册了 `/dsh-voice` 这段前缀：
+
+```js
+ctx.webServer.register({ kind: 'prefix', path: '/dsh-voice', handler: routes })
+```
+
+所以 `client.js` 里的每一次 `api.tts()` / `api.stt()` 都是一次**发到本机的 HTTP 请求**：
+浏览器半区 → `127.0.0.1:<端口>/dsh-voice/tts` → 宿主 → 上游服务 → 原路返回。
+
+> 这条通道只绑回环地址，不对外网开放；路由另有**回环 + 同站点**校验，
+> 页面与它不同源时会被拒绝（`403`）。详见 `lib/routes.js`。
+
 ```
 dsh-voice-chat/
 ├── package.json            插件清单：dsh.bundle.patch + dsh.client(web) + onnxruntime-node 依赖

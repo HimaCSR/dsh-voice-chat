@@ -234,6 +234,15 @@ export function apply(ctx, rawConfig = {}) {
   }
 
   /**
+   * The size at which the log file is rolled over.
+   *
+   * The file grows on its own — every request that fails, every reload —
+   * and nothing ever removed it. A cap keeps a long-lived installation from
+   * filling the disk with diagnostics nobody reads.
+   */
+  const LOG_MAX_BYTES = 1024 * 1024;
+
+  /**
    * Append a line to the plugin's own log file.
    *
    * The file is what `GET /log` serves, so it is the only place the Host
@@ -245,7 +254,19 @@ export function apply(ctx, rawConfig = {}) {
     const line = `[voice-chat] ${new Date().toISOString()} ${redact(text)}\n`;
     try {
       void fs.mkdir(path.dirname(config.logPath), { recursive: true })
-        .then(() => fs.appendFile(config.logPath, line, 'utf8'))
+        .then(async () => {
+          // Roll the file over before it grows past the cap. The old file
+          // is kept under a second name, so the recent history survives.
+          try {
+            const stat = await fs.stat(config.logPath);
+            if (stat.size + Buffer.byteLength(line) > LOG_MAX_BYTES) {
+              await fs.rename(config.logPath, `${config.logPath}.1`);
+            }
+          } catch {
+            // No file yet, or it cannot be measured: just append.
+          }
+          await fs.appendFile(config.logPath, line, 'utf8');
+        })
         .catch(() => {});
     } catch {
       // The console still has the line.
