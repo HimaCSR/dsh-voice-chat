@@ -1133,7 +1133,7 @@ registerProcessor('voice-chat-mic', MicCapture);
       providerModel: '模型',
       providerVoice: '音色',
       providerFormat: '返回格式',
-      providerApiKey: 'API Key',
+      providerApiKey: '当前服务的 API Key',
       providerApiKeyEnv: '环境变量名',
       providerClone: '支持声音克隆',
       providerDelete: '删除',
@@ -1171,7 +1171,38 @@ registerProcessor('voice-chat-mic', MicCapture);
       depInstallFailed: '安装失败',
       depRestartHint: '依赖装进 DSH 的 profile 后需要重启 DSH 才能生效。',
       depOptionalHint: 'onnxruntime-node 只影响断句检测（FireRedVAD）；缺少它会自动改用别的断句方式，识别和朗读仍然可用。',
-      copyDiag: '复制诊断信息',
+      // ── messages ────────────────────────────────────────────────────────────
+      errNoSession: '没有活动会话',
+      errSessionGone: '会话不可用',
+      errSendFailed: '发送失败',
+      errSessionChanged: '会话已经切换，这句话没有发送',
+      errServiceDown: '语音服务不可用',
+      errModelPrepare: '模型准备失败',
+      errModelTimeout: '模型准备超时：等了 30 分钟仍未完成，请重新开始。',
+      errRecognize: '识别失败',
+      errMicOpen: '无法打开麦克风',
+      errSpeak: '朗读失败',
+      errHostRefused: '宿主拒绝了本页面的请求',
+      errHostRefusedReason: '来源不一致',
+      errHostOriginUnknown: '未知',
+      speakRetry: '稍后重试',
+      speakRetrySpent: '已经试过两次，仍未成功',
+      busyVoice: '音色',
+      busyCreateVoice: '创建音色',
+      busyDeleteVoice: '删除音色',
+      busySavePersona: '保存人设',
+      busyCheckUpdate: '检查更新',
+      busyUpdate: '更新',
+      busyInstallDep: '安装',
+      busySaveProvider: '保存服务',
+      busySwitchProvider: '切换服务',
+      busyDeleteProvider: '删除服务',
+      busySaveKey: '保存 Key',
+      busySpeakMode: '保存播报方式',
+      busyPrepareModels: '准备模型',
+      pickRefAudio: '请先选择参考音频',
+      pickRefText: '请填写参考音频对应的文字，该服务靠它与音频对齐',
+      providerCloneHint: '由所选接口格式的能力决定，不能手动更改。',
       // ── version update ─────────────────────────────────────────────────────
       versionSection: '版本更新',
       currentVersion: '当前版本',
@@ -1282,7 +1313,7 @@ registerProcessor('voice-chat-mic', MicCapture);
       providerModel: 'Model',
       providerVoice: 'Voice',
       providerFormat: 'Response format',
-      providerApiKey: 'API key',
+      providerApiKey: 'API key of the current service',
       providerApiKeyEnv: 'Environment variable',
       providerClone: 'Supports voice cloning',
       providerDelete: 'Delete',
@@ -1320,7 +1351,38 @@ registerProcessor('voice-chat-mic', MicCapture);
       depInstallFailed: 'Install failed',
       depRestartHint: 'A dependency installed into the DSH profile takes effect after DSH is restarted.',
       depOptionalHint: 'onnxruntime-node only affects the endpoint detector (FireRedVAD). Without it another detector is used instead; recognition and speech still work.',
-      copyDiag: 'Copy diagnostics',
+      // ── messages ────────────────────────────────────────────────────────────
+      errNoSession: 'There is no active session',
+      errSessionGone: 'The session is not available',
+      errSendFailed: 'Sending failed',
+      errSessionChanged: 'The session changed, so the sentence was not sent',
+      errServiceDown: 'The speech service is not available',
+      errModelPrepare: 'Preparing the models failed',
+      errModelTimeout: 'Preparing the models timed out: still not done after 30 minutes, please start again.',
+      errRecognize: 'Recognition failed',
+      errMicOpen: 'The microphone could not be opened',
+      errSpeak: 'Reading out failed',
+      errHostRefused: 'The host refused the requests from this page',
+      errHostRefusedReason: 'the origin does not match',
+      errHostOriginUnknown: 'unknown',
+      speakRetry: 'it will be tried again shortly',
+      speakRetrySpent: 'it was tried twice and still failed',
+      busyVoice: 'Voice',
+      busyCreateVoice: 'Creating the voice',
+      busyDeleteVoice: 'Deleting the voice',
+      busySavePersona: 'Saving the persona',
+      busyCheckUpdate: 'Checking for updates',
+      busyUpdate: 'Updating',
+      busyInstallDep: 'Installing',
+      busySaveProvider: 'Saving the service',
+      busySwitchProvider: 'Switching service',
+      busyDeleteProvider: 'Deleting the service',
+      busySaveKey: 'Saving the key',
+      busySpeakMode: 'Saving what gets read out',
+      busyPrepareModels: 'Preparing the models',
+      pickRefAudio: 'Choose a reference audio first',
+      pickRefText: 'Write down what the reference audio says; this service matches it against the audio',
+      providerCloneHint: 'Decided by what the wire format can do; it cannot be changed by hand.',
       // ── version update ─────────────────────────────────────────────────────
       versionSection: 'Version update',
       currentVersion: 'Current version',
@@ -1342,6 +1404,21 @@ registerProcessor('voice-chat-mic', MicCapture);
       modelPrepHint: 'Model preparation downloads the local recognition models (SenseVoice plus the endpoint detector). It runs offline, needs no key, and is what lets the plugin understand you. The TTS service settings are separate: they read the reply aloud.',
       preparingModel: 'Preparing models…',
     };
+
+    /**
+     * A translator for the messages the engine itself writes.
+     *
+     * The components get a `t` of their own from the Host. The engine's
+     * messages are made outside a component, so they need a dictionary of
+     * their own: they follow the language the browser asks for.
+     *
+     * @returns {(key: string) => string} the translator.
+     */
+    function localT() {
+      const asked = typeof navigator === 'undefined' ? 'zh' : String(navigator.language ?? 'zh');
+      const dictionary = /^zh/i.test(asked) ? zh : en;
+      return (key) => dictionary[key] ?? key;
+    }
     // ──────────────────────────────────────────────────────────────── styling
 
     const styles = {
@@ -1832,6 +1909,10 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
       // the console without guessing whether the toolbar is simply off-screen.
       console.log('[voice-chat] client half loaded; seats: conversation.input.dock / conversation.input.left');
 
+      // The engine writes some of its own messages, and it does so outside a
+      // component — where the Host's own translator is not at hand.
+      const t = localT();
+
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'voice-chat: dictionaries');
       ctx.effect(() => ensureStyleTag(), 'voice-chat: orb styles');
 
@@ -1867,6 +1948,10 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
         // the order they were spoken.
         pendingUtterances: [],
         sessionId: undefined,
+        // The session the microphone was opened in. The seat is mounted per
+        // session, and words that were spoken in one conversation must not be
+        // sent to another one.
+        recordedSessionId: undefined,
         listeners: new Set(),
         options: {
           minSilenceMs: 900,
@@ -1907,7 +1992,7 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
             const caller = await api.ping?.();
             if (caller && caller.allowed === false) {
               setEngine({
-                error: `宿主拒绝了本页面的请求：${caller.reason ?? '来源不一致'}（页面来源 ${caller.origin ?? '未知'}）`,
+                error: `${t('errHostRefused')}：${caller.reason ?? t('errHostRefusedReason')}（页面来源 ${caller.origin ?? t('errHostOriginUnknown')}）`,
               });
             }
           } catch {
@@ -1927,7 +2012,7 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
           if (state.error) setEngine({ error: state.error });
           return state;
         } catch (error) {
-          setEngine({ ready: false, error: `语音服务不可用：${error.message ?? error}` });
+          setEngine({ ready: false, error: `${t('errServiceDown')}：${error.message ?? error}` });
           return null;
         }
       }
