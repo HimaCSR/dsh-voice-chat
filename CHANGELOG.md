@@ -132,6 +132,7 @@
 - **TTS 指令（语气设定）**：单独一个输入框。写法见 MiMo 官方「导演模式」三段式 ——【角色】/【场景】/【指导】；情绪标签如 `(开心)`、`[叹气]` 写在**要读的那句**里。克隆音色同样受语气指令管辖
 - **版本更新**：设置里可查最新版本并一键更新。**不需要自建服务器** —— 直接问 GitHub Releases API，失败则回落到 `gh-proxy.com` 镜像（两者均已实测 200）。查询结果按小时缓存，避免撞上 GitHub 匿名 60 次/小时的限额
 - **依赖审查与安装**：诊断里直接列出插件自己的依赖（`onnxruntime-node`）与运行时自带的依赖（`sherpa-onnx-node`），标明版本、要求、来源与状态；缺的那一个可以点按钮装进当前 DSH profile
+- **文档写清 `github:` 装法**：README 与 Release 说明都给出「在 DSH 的添加插件框里填 `github:HimaCSR/dsh-voice-chat`」这条路径（**不是** `https://` 网址），并补上 `github:` 安装卡在 `git ls-remote` 时的两条处理 —— HTTPS 不通就改走 SSH 传输，SSH 找不到私钥就在 `~/.ssh/config` 里写明 `IdentityFile`（pnpm 会设 `GIT_SSH_COMMAND`，它会覆盖 git 的 `core.sshCommand`）
 
 ### 移除
 - **OpenRouter 从推荐列表移除**：它的免费档不路由到支持克隆的端点，推荐它等于许诺做不到的事。代码里的适配能力仍在，需要的用户可以自行添加

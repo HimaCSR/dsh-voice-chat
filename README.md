@@ -46,10 +46,16 @@ dsh plugin --profile desktop add github:HimaCSR/dsh-voice-chat
 **方式 B：Web 界面**
 
 1. 侧栏 → **插件** → **添加插件**
-2. 在输入框里粘贴插件目录的绝对路径，例如：
-   ```
-   <你放置插件的目录>\dsh-voice-chat
-   ```
+2. 在输入框里粘贴下面两者之一：
+
+   | 粘贴什么 | 什么时候用 |
+   |---|---|
+   | `github:HimaCSR/dsh-voice-chat` | 装仓库里的正式发布版 —— **别人机器上的推荐写法** |
+   | `<你放置插件的目录>\dsh-voice-chat` | 本地开发目录（你自己改代码时用这个） |
+
+   > 仓库写法是 **`github:` 开头**，不是 `https://github.com/...` 网址。DSH 认的是前者；
+   > 照抄同目录其它社区插件的写法（如 `github:Alm-Allen/dsh-cangjie-preset`）即可。
+
 3. 点 **安装**，装完点 **立即启用**
 4. 刷新页面（`Ctrl+R`）
 
@@ -70,6 +76,18 @@ dsh plugin --profile desktop add github:HimaCSR/dsh-voice-chat
 > - pnpm 报 `ERR_PNPM_IGNORED_BUILDS: onnxruntime-node` 是**正常且无害**的（本机已实测：不跑脚本，原生绑定照样加载、推理照样成功）；
 > - 本机把 profile 的 `pnpm-workspace.yaml` 里 pnpm 写下的 `allowBuilds: onnxruntime-node:` 置为 `false`，即明确拒绝执行该脚本，插件功能不受影响。想改成允许就把它设为 `true`；
 > - `onnxruntime-node` 解包约 287 MB，只用于 FireRedVAD。**没装上也不会让插件挂掉**——它会自动降级到 TEN-VAD，并在设置面板与 `/dsh-voice/state` 的 `vadNote` 里说明原因。
+
+### `github:` 安装卡住时
+
+`github:` 安装会先跑 `git ls-remote https://github.com/HimaCSR/dsh-voice-chat` 取版本号，再从 codeload 下载源码包。**第一步走的是 HTTPS**，所以有些网络环境下会卡住。
+
+| 报错 | 处理 |
+|---|---|
+| `Failed to connect to github.com port 443` / `ETIMEDOUT` | 这台机器的 HTTPS 到 GitHub 不通。改成走 SSH：<br>`git config --global url."git@github.com:".insteadOf "https://github.com/"` |
+| `Could not read from remote repository`（已改走 SSH） | 换了传输但找不到私钥。SSH 私钥若不是默认文件名（`id_rsa` / `id_ed25519`），要在 `~/.ssh/config` 里写明 —— pnpm 会设 `GIT_SSH_COMMAND`，**它会覆盖 git 的 `core.sshCommand`**：<br>`Host github.com`<br>`  IdentityFile ~/.ssh/你的私钥`<br>`  IdentitiesOnly yes` |
+| 两条都试过还是不行 | 改用**方式 B 的本地 zip**：下载 Release 附件，解压后把 `dsh-voice-chat/` 整个目录放进 profile 的插件目录 |
+
+> 上表两条配置都只影响这台机器的 git 传输方式，不改插件本身。
 
 ---
 
