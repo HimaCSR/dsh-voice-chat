@@ -542,6 +542,23 @@ registerProcessor('voice-chat-mic', MicCapture);
         this.released = false;
         const ctx = new AudioContext({ latencyHint: 'interactive' });
         this.ctx = ctx;
+        try {
+          await this.open(ctx);
+        } catch (error) {
+          // The audio context was already open when the permission was
+          // refused. Left alone it would sit there for the rest of the
+          // session — one per click — and the recorder would still look
+          // active, so the guard against a second microphone would not
+          // notice.
+          this.released = true;
+          this.ctx = null;
+          this.stream = null;
+          void ctx.close().catch(() => {});
+          throw error;
+        }
+      }
+
+      async open(ctx) {
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
         });
@@ -674,7 +691,19 @@ registerProcessor('voice-chat-mic', MicCapture);
         }
         this.chunks.push(buffer);
         this.bytes += buffer.byteLength;
-        if (!this.speaking) return;
+        if (!this.speaking) {
+          // The microphone is open most of the time, and the frames arrive
+          // whether anyone is talking or not. Keeping every quiet frame
+          // would grow without end — an hour of an open microphone is
+          // about a hundred megabytes — and every recognition request
+          // would carry all of it. Only the last moments are kept, because
+          // the first syllable of a word often falls into them.
+          while (this.chunks.length > PRE_ROLL_FRAMES) {
+            const dropped = this.chunks.shift();
+            this.bytes -= dropped.byteLength;
+          }
+          return;
+        }
         if (performance.now() - this.lastVoiceAt >= (this.options.minSilenceMs ?? 900)) this.flush();
       }
 
@@ -710,6 +739,29 @@ registerProcessor('voice-chat-mic', MicCapture);
     // ───────────────────────────────────────────────────────────── text tools
 
     const TERMINATORS = new Set(['。', '！', '？', '!', '?', '…']);
+
+    /**
+     * The last reply that was already finished when the plugin mounted.
+     *
+     * This is the line between history and something new, and it has to
+     * count only the replies that had *finished*. A reply that is still
+     * being written when the plugin mounts is new: it is being written
+     * now, for the user who is looking at the screen, and it is the one
+     * reply they most expect to hear. Counting it as history would leave
+     * the plugin silent exactly when the user is waiting for it.
+     * @param nodes - the chat nodes.
+     * @returns the anchor to skip up to; 0 when there is no history.
+     */
+    function historyAnchor(nodes) {
+      let anchor = 0;
+      for (const node of nodes) {
+        if (node.kind !== 'assistant-step') continue;
+        if (node.data?.status !== 'settled') continue;
+        const seq = node.anchorSeq ?? 0;
+        if (seq > anchor) anchor = seq;
+      }
+      return anchor;
+    }
 
     function isTrivial(sentence) {
       if (sentence.length <= 1) return true;
@@ -749,6 +801,11 @@ registerProcessor('voice-chat-mic', MicCapture);
      */
     function pickSpoken(speakable, mode, settled, spoken) {
       if (speakable.length === 0) return [];
+      // An unknown mode falls back to the default rather than saying
+      // nothing: the mode comes from the configuration file, and a value
+      // this version does not know should still leave the user hearing the
+      // reply instead of silence.
+      const choice = ['all', 'head', 'tail', 'head-tail'].includes(mode) ? mode : 'head-tail';
       // A one-sentence reply is both the first and the last sentence, so the
       // choice is collected through one place that refuses to say the same
       // sentence twice.
@@ -757,15 +814,15 @@ registerProcessor('voice-chat-mic', MicCapture);
         if (sentence === undefined || spoken.has(sentence) || out.includes(sentence)) return;
         out.push(sentence);
       };
-      if (mode === 'all') {
+      if (choice === 'all') {
         speakable.forEach(take);
         return out;
       }
       const first = speakable[0];
       const last = speakable[speakable.length - 1];
-      if (mode === 'head' || mode === 'head-tail') take(first);
+      if (choice === 'head' || choice === 'head-tail') take(first);
       // The closing sentence is only known once the reply has settled.
-      if (mode === 'tail' || mode === 'head-tail') {
+      if (choice === 'tail' || choice === 'head-tail') {
         if (settled) take(last);
       }
       return out;
@@ -1622,6 +1679,12 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
         ttsController: null,
         interruptHandler: null,
         recorder: null,
+        // True while the microphone is being opened, so a second click does
+        // not start a second recorder; and set when the microphone is closed
+        // while it is still being opened, so that start gives up instead of
+        // opening a microphone the user just turned off.
+        starting: false,
+        stopRequested: false,
         sessionId: undefined,
         listeners: new Set(),
         options: {
@@ -1787,6 +1850,13 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
 
       async function startListening(sessionId) {
         if (engine.recorder?.active) return;
+        // Opening the microphone asks for permission, and that wait is long
+        // enough for a second click to get in. Without this guard two
+        // recorders would end up holding the microphone at the same time:
+        // the second one would be remembered, the first one would be
+        // orphaned but still collecting, and every word would be sent twice.
+        if (engine.starting) return;
+        engine.starting = true;
         if (sessionId !== undefined) engine.sessionId = sessionId;
         // The recorder shares the engine's options object rather than a copy,
         // so a threshold changed in the settings panel reaches the open
@@ -1803,12 +1873,26 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
           setEngine({ error: message });
           void client.reportError?.('microphone', message, String(error?.stack ?? '').slice(0, 500));
           return;
+        } finally {
+          engine.starting = false;
+        }
+        // The user may have turned the microphone off while the permission
+        // prompt was up. In that case the recorder is not wanted: it is
+        // stopped and dropped, and the microphone stays closed.
+        if (engine.stopRequested) {
+          engine.stopRequested = false;
+          recorder.stop();
+          return;
         }
         engine.recorder = recorder;
         setEngine({ listening: 'open', error: null });
       }
 
       function stopListening() {
+        // A start that is still waiting for permission cannot be cancelled
+        // from here, but it can be marked: when it comes back it stops
+        // itself instead of opening a microphone the user just closed.
+        engine.stopRequested = true;
         engine.recorder?.stop();
         engine.recorder = null;
         setEngine({ listening: false });
@@ -2197,10 +2281,13 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
           action: 'stop',
         };
       }
+      // Speaking comes before the microphone: the microphone is open most of
+      // the time, and a read-out that never shows up because the mic got
+      // there first is a read-out nobody notices.
+      if (engine.speaking) return { kind: 'busy', text: t('thinking'), action: 'stop' };
       if (engine.listening === 'speech') return { kind: 'live', text: t('listening'), action: 'stop' };
       if (engine.listening === 'open') return { kind: 'live', text: t('mic'), action: 'stop' };
       if (engine.recognizing) return { kind: 'busy', text: t('recognizing'), action: 'stop' };
-      if (engine.speaking) return { kind: 'busy', text: t('thinking'), action: 'stop' };
       if (engine.error) return { kind: 'warn', text: String(engine.error), action: 'settings' };
       if (engine.ready === false) return { kind: 'warn', text: t('notReady'), action: 'settings' };
       return { kind: 'quiet', text: t('ready'), action: null };
@@ -2370,14 +2457,17 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
       const listening = engine.listening === 'open' || engine.listening === 'speech';
       // `notready` outranks the rest: with the models missing, the amber bead is
       // the only thing worth saying, whatever the microphone is doing.
+      // Speaking outranks listening: the microphone is open most of the time,
+      // so a state that put listening first would mean the read-out never
+      // showed up — no colour change, no movement with the voice.
       const state = engine.ready === false
         ? 'notready'
         : engine.recognizing
           ? 'recognizing'
-          : listening
-            ? 'listening'
-            : engine.speaking
-              ? 'speaking'
+          : engine.speaking
+            ? 'speaking'
+            : listening
+              ? 'listening'
               : 'idle';
 
       // The outline is drawn by JS in two situations: while audio drives it
@@ -3067,6 +3157,14 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
       const saveProvider = () => {
         if (form === null) return;
         const record = { ...form };
+        // An empty key field means "leave the stored key alone", not "clear
+        // it". The Host reads a blank key as a request to clear the stored
+        // one, so editing a service to change its model would wipe the key
+        // the user had saved. The field is only sent when something was
+        // actually typed into it.
+        if (typeof record.apiKey === 'string' && record.apiKey.trim() === '') {
+          delete record.apiKey;
+        }
         void withBusy('保存服务', async () => {
           const payload = await client.saveProvider(record);
           setProviders(payload.providers ?? []);
@@ -3667,12 +3765,15 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
           if (anchor > maxAnchor) maxAnchor = anchor;
         }
         // History protection: never replay a conversation the user merely
-        // opened. The baseline freezes on the first settled reply.
+        // opened. The baseline freezes on the replies that were already
+        // finished when the plugin mounted — not on the first one that
+        // finishes afterwards, which in an empty conversation is the very
+        // first reply the user gets, and skipping it means the plugin says
+        // nothing at all when a new session starts.
         if (baselineRef.current === null) {
-          if (hasSettled && maxAnchor > 0) {
-            baselineRef.current = maxAnchor;
-            skipRef.current = maxAnchor;
-          }
+          const settledAnchor = historyAnchor(nodes);
+          baselineRef.current = settledAnchor;
+          skipRef.current = settledAnchor;
           return;
         }
         if (interruptedRef.current) {
@@ -3754,6 +3855,10 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
       apply,
       __internals: {
         splitSentences,
+        historyAnchor,
+        sliderToThreshold,
+        thresholdToSlider,
+        PROVIDER_ID_PATTERN,
         cleanReplyText,
         pickSpoken,
         chatNodes,

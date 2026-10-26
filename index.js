@@ -16,7 +16,7 @@ import { inspectAssets, prepareAssets, resolveAssets } from './lib/assets.js';
 import { SttService } from './lib/stt.js';
 import { createVoiceRoutes } from './lib/routes.js';
 import { anchorList, probeModule, setModuleAnchors } from './lib/sherpa.js';
-import { BUILTIN_PROVIDERS, mergeProviderRecord, normalizeProviders, resolveProvider } from './lib/tts.js';
+import { BUILTIN_PROVIDERS, PROVIDER_KINDS, checkBaseUrl, mergeProviderRecord, normalizeProviders, resolveProvider } from './lib/tts.js';
 import { UpdateChecker, readPluginVersion } from './lib/version.js';
 import { registerPersona, DEFAULT_PERSONA } from './lib/persona.js';
 import { auditDependencies, installDependency, readManifest } from './lib/deps.js';
@@ -101,13 +101,36 @@ const DEFAULTS = {
 /** The ways a reply can be read out. */
 const SPEAK_MODES = ['head-tail', 'all', 'head', 'tail'];
 
-/** The provider kinds a user may create. */
-const PROVIDER_KINDS = ['mimo', 'openai-speech', 'siliconflow', 'dev-tone'];
+/**
+ * Put a stored provider table back through the rules it has to obey.
+ *
+ * The table can also arrive from `config.json` or a bundle patch, which do
+ * not go through the /providers route and therefore never met the field
+ * and environment-variable rules. The list of environment variables a key
+ * may be read from is only worth something if it is applied on the way
+ * in, and this is one of the ways in.
+ * @param table - the stored table.
+ * @returns the table with every record reduced to the known fields.
+ */
+function sanitizeProviderTable(table) {
+  if (table === null || typeof table !== 'object' || Array.isArray(table)) return {};
+  const out = {};
+  for (const [id, record] of Object.entries(table)) {
+    if (record === null || typeof record !== 'object' || Array.isArray(record)) continue;
+    const kind = typeof record.kind === 'string' ? record.kind : 'openai-speech';
+    out[id] = mergeProviderRecord({}, record, id, kind);
+  }
+  return out;
+}
 
 const MUTABLE = {
   voice: 'tts.voice',
   apiKey: 'tts.apiKey',
-  baseUrl: 'tts.baseUrl',
+  // `tts.baseUrl` is deliberately not here. It is the legacy MiMo address:
+  // it is still read (so old configurations keep working), but it is not
+  // written from a request, because this is the address the API key is
+  // sent to. A service the user added lives in the provider table, which
+  // is written through /providers and checked there.
   provider: 'tts.provider',
   model: 'tts.model',
   cloneModel: 'tts.cloneModel',
@@ -268,7 +291,17 @@ export function apply(ctx, rawConfig = {}) {
         if (stored[key] !== undefined) setPath(config, dotted, stored[key]);
       }
       for (const [key, dotted] of Object.entries(MUTABLE_OBJECTS)) {
-        if (stored[key] !== undefined) setPath(config, dotted, stored[key]);
+        if (stored[key] === undefined) continue;
+        if (key === 'providers') {
+          // The stored table did not come through the /providers route, so
+          // it never met the field and environment-variable rules. Run it
+          // through them again: the closed list of environment variables is
+          // only worth anything if it is applied on the way in, and this is
+          // the way in.
+          setPath(config, dotted, sanitizeProviderTable(stored[key]));
+          continue;
+        }
+        setPath(config, dotted, stored[key]);
       }
       log('restored runtime overrides');
     }
