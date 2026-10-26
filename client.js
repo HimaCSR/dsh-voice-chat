@@ -1012,6 +1012,45 @@ registerProcessor('voice-chat-mic', MicCapture);
       return now >= (entry.notBefore ?? 0);
     }
 
+    /**
+     * The keys of the sentences that are spoken or on their way.
+     *
+     * These are the sentences that must not be picked again: one was read
+     * out, the other is on its way to the speaker.
+     *
+     * @param {Map<string, object>} record - what is known about the sentences.
+     * @returns {Set<string>} the keys.
+     */
+    function spokenKeys(record) {
+      const keys = new Set();
+      for (const [key, entry] of record ?? []) {
+        if (entry?.state === 'spoken' || entry?.state === 'pending') keys.add(key);
+      }
+      return keys;
+    }
+
+    /**
+     * How long until a failed sentence may be tried again.
+     *
+     * @param {Map<string, Map<string, object>>} records - what is known about
+     *        the sentences of every reply.
+     * @param {number} [now] - the current time.
+     * @returns {number|null} the wait in milliseconds, or null when there is
+     *          nothing waiting to be retried.
+     */
+    function retryDelay(records, now = Date.now()) {
+      let wait = null;
+      for (const record of records?.values() ?? []) {
+        for (const entry of record.values()) {
+          if (entry?.state !== 'failed') continue;
+          if ((entry.attempts ?? 0) >= MAX_SPEECH_ATTEMPTS) continue;
+          const due = Math.max(0, (entry.notBefore ?? 0) - now);
+          wait = wait === null ? due : Math.min(wait, due);
+        }
+      }
+      return wait;
+    }
+
     /** Strip markdown, code fences and URLs so the reader never speaks markup. */
     function cleanReplyText(text, maxChars) {
       const limit = maxChars ?? 600;
@@ -1041,6 +1080,34 @@ registerProcessor('voice-chat-mic', MicCapture);
       } catch {
         return [];
       }
+    }
+
+    /**
+     * A mark of the conversation: what the read-out depends on.
+     *
+     * The mark is built from the content rather than from the identity of
+     * the snapshot. The Host may hand the same snapshot over again, and a
+     * read-out that depends on how the Host builds its snapshots is a
+     * read-out that stops without a word. The mark changes exactly when
+     * the replies did: a reply that grows while it is written grows the
+     * mark too.
+     *
+     * @param {object} chat - the chat snapshot.
+     * @returns {string} the mark.
+     */
+    function chatFingerprint(chat) {
+      const nodes = chatNodes(chat);
+      let mark = '';
+      for (const node of nodes) {
+        if (node.kind !== 'assistant-step') continue;
+        const data = node.data ?? {};
+        let size = 0;
+        for (const block of data.blocks ?? []) {
+          if (block.kind === 'text') size += block.text.length;
+        }
+        mark += `${node.key}~${data.status}~${size};`;
+      }
+      return mark;
     }
 
     // ─────────────────────────────────────────────────────────── dictionaries
@@ -1080,7 +1147,6 @@ registerProcessor('voice-chat-mic', MicCapture);
       recognizing: '识别中…',
       thinking: '正在说话…',
       noKey: '未配置 TTS API Key',
-      diag: '诊断',
       downloadFailed: '下载失败',
       copyDiag: '复制诊断信息',
       copied: '已复制',
@@ -1099,6 +1165,7 @@ registerProcessor('voice-chat-mic', MicCapture);
       voicePrefs: '音色偏好',
       cloneVoice: '克隆音色',
       cloneVoiceHint: '克隆音色需要所选服务支持声音克隆；不支持的服务不能创建克隆音色。',
+      clonedVoiceLabel: '（克隆）',
       noCloneSupport: '当前服务不支持声音克隆',
       sampleVoice: '试听',
       defaultVoice: '默认音色',
@@ -1185,6 +1252,7 @@ registerProcessor('voice-chat-mic', MicCapture);
       errHostRefused: '宿主拒绝了本页面的请求',
       errHostRefusedReason: '来源不一致',
       errHostOriginUnknown: '未知',
+      errHostOriginLabel: '页面来源',
       speakRetry: '稍后重试',
       speakRetrySpent: '已经试过两次，仍未成功',
       busyVoice: '音色',
@@ -1260,7 +1328,6 @@ registerProcessor('voice-chat-mic', MicCapture);
       recognizing: 'Recognizing…',
       thinking: 'Speaking…',
       noKey: 'TTS API key is not configured',
-      diag: 'Diagnostics',
       downloadFailed: 'Download failed',
       copyDiag: 'Copy diagnostics',
       copied: 'Copied',
@@ -1279,6 +1346,7 @@ registerProcessor('voice-chat-mic', MicCapture);
       voicePrefs: 'Voice preferences',
       cloneVoice: 'Cloned voice',
       cloneVoiceHint: 'Cloning needs a provider that supports it; a provider without clone support cannot create one.',
+      clonedVoiceLabel: ' (cloned)',
       noCloneSupport: 'This provider does not support voice cloning',
       sampleVoice: 'Play',
       defaultVoice: 'Default voice',
@@ -1365,6 +1433,7 @@ registerProcessor('voice-chat-mic', MicCapture);
       errHostRefused: 'The host refused the requests from this page',
       errHostRefusedReason: 'the origin does not match',
       errHostOriginUnknown: 'unknown',
+      errHostOriginLabel: 'page origin',
       speakRetry: 'it will be tried again shortly',
       speakRetrySpent: 'it was tried twice and still failed',
       busyVoice: 'Voice',
@@ -2055,10 +2124,6 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
         // the order they were spoken.
         pendingUtterances: [],
         sessionId: undefined,
-        // The session the microphone was opened in. The seat is mounted per
-        // session, and words that were spoken in one conversation must not be
-        // sent to another one.
-        recordedSessionId: undefined,
         listeners: new Set(),
         options: {
           minSilenceMs: 900,
@@ -2099,7 +2164,7 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
             const caller = await api.ping?.();
             if (caller && caller.allowed === false) {
               setEngine({
-                error: `${t('errHostRefused')}：${caller.reason ?? t('errHostRefusedReason')}（页面来源 ${caller.origin ?? t('errHostOriginUnknown')}）`,
+                error: `${t('errHostRefused')}：${caller.reason ?? t('errHostRefusedReason')}（${t('errHostOriginLabel')} ${caller.origin ?? t('errHostOriginUnknown')}）`,
               });
             }
           } catch {
@@ -2295,7 +2360,6 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
         // from here on belong to this conversation, whatever happens to the
         // seat in between.
         const recordedSession = engine.sessionId;
-        engine.recordedSessionId = recordedSession;
         // Every recorder gets its own copy of the options. The callbacks
         // belong to the recorder that is being opened, and writing them
         // into the shared object would overwrite the previous recorder's
@@ -3501,7 +3565,7 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
 
       const pickVoice = (voice) => {
         writeString(STORAGE.voice, voice);
-        void withBusy('音色', async () => {
+        void withBusy(t('busyVoice'), async () => {
           await client.configure({ voice });
           await refreshState();
         });
@@ -3509,16 +3573,16 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
 
       const upload = () => {
         if (file === null) {
-          setError('请先选择参考音频');
+          setError(t('pickRefAudio'));
           return;
         }
         // The service matches the words against the sample, so a missing
         // transcript is a failed clone waiting to happen.
         if (cloneNeedsTranscript && refText.trim() === '') {
-          setError('请填写参考音频对应的文字，该服务靠它与音频对齐');
+          setError(t('pickRefText'));
           return;
         }
-        void withBusy('创建音色', async () => {
+        void withBusy(t('busyCreateVoice'), async () => {
           const buffer = await file.arrayBuffer();
           const bytes = new Uint8Array(buffer);
           let binary = '';
@@ -3599,10 +3663,6 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
       // next utterance uses it.
       const applySensitivity = (key, position) => {
         writeString(STORAGE[key], String(position));
-        // The options object is shared with the running recorder, which reads
-        // the thresholds on every frame. It is therefore changed in place: a
-        // fresh copy would leave the open microphone on the old thresholds
-        // until it was reopened.
         const options = engine.options;
         if (key === 'sensitivity') {
           options.interruptThreshold = sliderToThreshold(SENSITIVITY.interrupt, position);
@@ -3611,12 +3671,21 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
           options.rmsThreshold = sliderToThreshold(SENSITIVITY.minRms, position);
           setMinRms(position);
         }
+        // The open microphone holds its own copy of the options — its
+        // callbacks belong to it and must not be shared — so the new
+        // threshold is pushed into that copy as well. Without this the open
+        // microphone would keep the old threshold until it was reopened.
+        const live = engine.recorder?.options;
+        if (live !== undefined && live !== null) {
+          live.interruptThreshold = options.interruptThreshold;
+          live.rmsThreshold = options.rmsThreshold;
+        }
         force((value) => value + 1);
       };
 
       // Save the persona and the speaking style together.
       const savePersona = () => {
-        void withBusy('保存人设', async () => {
+        void withBusy(t('busySavePersona'), async () => {
           await client.configure({ persona, instruction: style });
           await refreshState();
           setNote(t('providerSaved'));
@@ -3625,7 +3694,7 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
 
       // Check for a newer release.
       const checkUpdate = () => {
-        void withBusy('检查更新', async () => {
+        void withBusy(t('busyCheckUpdate'), async () => {
           const result = await client.version();
           setUpdate(result);
         });
@@ -3637,7 +3706,7 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
         if (!latest) return;
         if (!window.confirm(t('updateConfirm'))) return;
         const spec = `github:HimaCSR/dsh-voice-chat@v${latest}`;
-        void withBusy('更新', async () => {
+        void withBusy(t('busyUpdate'), async () => {
           const result = await client.installVersion(spec);
           setUpdate({ ...update, install: result });
         });
@@ -3645,25 +3714,34 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
 
       // Install one missing dependency into the DSH profile.
       const installDependency = (entry) => {
-        void withBusy(`安装 ${entry.name}`, async () => {
-          setDepsInstall({ running: true, name: entry.name, output: [], error: null });
-          await client.installDependency(entry.name, entry.required ?? '');
-          // The install runs in the background; its log is polled until it
-          // stops. The poll gives up when the panel is closed, so it does not
-          // keep talking to a panel that is no longer on screen.
-          const poll = async () => {
-            if (!aliveRef.current) return;
-            const state = await client.dependencyInstallStatus();
-            if (!aliveRef.current) return;
-            setDepsInstall(state);
-            if (state.running === true) {
-              window.setTimeout(() => void poll(), 900);
-              return;
-            }
-            const refreshed = await client.dependencies();
-            setDeps(refreshed.entries ?? []);
-          };
-          await poll();
+        void withBusy(`${t('busyInstallDep')} ${entry.name}`, async () => {
+          setDepsInstall(installStarted(entry.name));
+          try {
+            await client.installDependency(entry.name, entry.required ?? '');
+            // The install runs in the background; its log is polled until it
+            // stops. The poll gives up when the panel is closed, so it does not
+            // keep talking to a panel that is no longer on screen.
+            const poll = async () => {
+              if (!aliveRef.current) return;
+              const state = await client.dependencyInstallStatus();
+              if (!aliveRef.current) return;
+              setDepsInstall(state);
+              if (state.running === true) {
+                window.setTimeout(() => void poll(), 900);
+                return;
+              }
+              const refreshed = await client.dependencies();
+              setDeps(refreshed.entries ?? []);
+            };
+            await poll();
+          } catch (caught) {
+            // A failed install must not leave the panel saying "installing…"
+            // for ever: the run is over, the reason is shown, and the button
+            // comes back so the user can try again.
+            const message = String(caught?.message ?? caught);
+            setDepsInstall(installFailed(entry.name, message));
+            setError(message);
+          }
         });
       };
 
@@ -3679,7 +3757,12 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
         if (typeof record.apiKey === 'string' && record.apiKey.trim() === '') {
           delete record.apiKey;
         }
-        void withBusy('保存服务', async () => {
+        // Whether the service can clone a voice is the Host's decision, made
+        // from the wire format. The flag is therefore not sent from here: the
+        // browser has no say in it, and sending one would only pretend
+        // otherwise.
+        delete record.clone;
+        void withBusy(t('busySaveProvider'), async () => {
           const payload = await client.saveProvider(record);
           setProviders(payload.providers ?? []);
           setProviderForm(null);
@@ -3712,7 +3795,7 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
               voices.length > 0
                 ? h('optgroup', { label: t('newVoice') },
                   voices.map((voice) => h('option', { key: voice.name, value: `clone:${voice.name}` },
-                    `🎤 ${voice.name}（克隆）`)))
+                    `🎤 ${voice.name}${t('clonedVoiceLabel')}`)))
                 : null,
             )),
           voices.map((voice) => h('div', { key: voice.name, className: 'dshv-voicecard' },
@@ -3724,7 +3807,7 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
               h('span', { style: styles.note }, `${Math.round(voice.bytes / 1024)} KB`),
               h(Button, {
                 style: styles.knob,
-                onClick: () => void withBusy('删除音色', async () => {
+                onClick: () => void withBusy(t('busyDeleteVoice'), async () => {
                   await client.deleteVoice(voice.name);
                   await refreshState();
                 }),
@@ -3792,7 +3875,7 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
             h('select', {
               style: { ...styles.field, flex: 1 },
               value: config.speakMode ?? 'head-tail',
-              onChange: (event) => void withBusy('保存播报方式', async () => {
+              onChange: (event) => void withBusy(t('busySpeakMode'), async () => {
                 await client.configure({ speakMode: event.target.value });
                 await refreshState();
               }),
@@ -3821,7 +3904,7 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
                 h('option', { key: code, value: code }, t(`lang_${code}`)))))),
         h('div', { style: { margin: '10px 0 2px' } },
           h(Button, { className: 'dshv-primary', disabled: busy !== null, onClick: savePersona },
-            busy === '保存人设' ? `${t('save')}…` : t('save'))),
+            busy === t('busySavePersona') ? `${t('save')}…` : t('save'))),
       );
 
       // ── tab: advanced — the TTS service, the microphone, and the two
@@ -3914,12 +3997,19 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
             value: form.apiKeyEnv ?? '',
             onChange: (event) => setProviderForm({ ...form, apiKeyEnv: event.target.value }),
           })),
+        // Whether a service can clone a voice is the Host's business: it
+        // decides from the wire format, whatever the browser sends. The box
+        // therefore only reports that answer and cannot be ticked — a
+        // switch that looks real and does nothing is worse than none.
         h('div', { style: styles.row }, h('span', { style: styles.label }, t('providerClone')),
           h('input', {
             type: 'checkbox',
-            checked: form.clone === true,
-            onChange: (event) => setProviderForm({ ...form, clone: event.target.checked }),
-          })),
+            checked: cloneCapability,
+            disabled: true,
+            readOnly: true,
+            title: t('providerCloneHint'),
+          }),
+          h('span', { style: styles.note }, t('providerCloneHint'))),
         h('div', { style: { margin: '8px 0 2px' } },
           h(Button, {
             className: 'dshv-primary',
@@ -3950,7 +4040,7 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
               style: styles.knob,
               disabled: busy !== null,
               onClick: () => installDependency(entry),
-            }, busy === `安装 ${entry.name}` ? t('depInstalling') : t('depInstall')))
+            }, busy === `${t('busyInstallDep')} ${entry.name}` ? t('depInstalling') : t('depInstall')))
           : null,
       );
 
@@ -3969,7 +4059,7 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
                 // menu right above them.
                 const entry = providerList.find((item) => item.id === event.target.value);
                 if (entry) setProviderForm(providerFormFrom(entry));
-                void withBusy('切换服务', async () => {
+                void withBusy(t('busySwitchProvider'), async () => {
                   await client.configure({ provider: event.target.value });
                   await refreshState();
                 });
@@ -3981,7 +4071,7 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
               ? h(Button, {
                 style: styles.knob,
                 disabled: busy !== null,
-                onClick: () => void withBusy('删除服务', async () => {
+                onClick: () => void withBusy(t('busyDeleteProvider'), async () => {
                   const payload = await client.deleteProvider(selectedProvider.id);
                   setProviders(payload.providers ?? []);
                   setProviderForm(null);
@@ -4021,7 +4111,7 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
             h(Button, {
               style: styles.knob,
               disabled: busy !== null,
-              onClick: () => void withBusy('保存 Key', async () => {
+              onClick: () => void withBusy(t('busySaveKey'), async () => {
                 await client.configure({ apiKey: draftKey });
                 setDraftKey('');
                 await refreshState();
@@ -4098,7 +4188,7 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
           update !== null && update.hasUpdate === true
             ? h('div', { style: { marginTop: 6 } },
               h(Button, { className: 'dshv-primary', disabled: busy !== null, onClick: installUpdate },
-                busy === '更新' ? t('updateInstalling') : t('updateNow')))
+                busy === t('busyUpdate') ? t('updateInstalling') : t('updateNow')))
             : null,
           update !== null && update.hasUpdate === false && update.reachable === true
             ? h('div', { style: styles.note }, t('upToDate'))
@@ -4117,7 +4207,7 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
             : null,
           h('div', { style: { marginTop: 8 } },
             h(Button, { style: styles.knob, disabled: busy !== null, onClick: checkUpdate },
-              busy === '检查更新' ? t('checking') : t('checkUpdate')))),
+              busy === t('busyCheckUpdate') ? t('checking') : t('checkUpdate')))),
       );
 
       const tabContent = tab === 'persona' ? personaTab : tab === 'advanced' ? advancedTab : voicesTab;
@@ -4187,8 +4277,8 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
               h(Button, {
                 className: 'dshv-primary',
                 disabled: busy !== null,
-                onClick: () => void withBusy('准备模型', prepare),
-              }, busy === '准备模型' ? t('preparing') : t('prepare')))
+                onClick: () => void withBusy(t('busyPrepareModels'), prepare),
+              }, busy === t('busyPrepareModels') ? t('preparing') : t('prepare')))
             : null,
 
           // ── the tabs. The state of the plugin — status, errors, the model
@@ -4215,18 +4305,64 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
      * Hidden per-session listener. Streams complete sentences of the newest
      * assistant reply into the TTS provider and plays them in order, so a long
      * answer starts speaking long before it finishes streaming.
+     *
+     * Whether this seat has a chat snapshot to read is decided by the Host,
+     * and that decision must not reach the hooks: a hook that comes and goes
+     * between two renders makes React throw the whole tree away. The seat
+     * therefore renders one of two components, and each of them runs the
+     * same hooks on every render.
      */
     function ReplyListener(props) {
+      if (typeof props.useChat !== 'function') {
+        return h(ReplyCore, { ...props, chat: undefined });
+      }
+      return h(ReplyWithChat, props);
+    }
+
+    /**
+     * The listener of a seat that has a chat snapshot.
+     *
+     * The snapshot is read here, once per render, and handed down.
+     */
+    function ReplyWithChat(props) {
+      const chat = props.useChat((snapshot) => snapshot);
+      return h(ReplyCore, { ...props, chat });
+    }
+
+    /**
+     * The listener itself: it reads the chat snapshot it is given and speaks
+     * the sentences of the newest reply.
+     */
+    function ReplyCore(props) {
       const { engine, api: client, speaker, subscribe, setEngine } = props;
-      const useChatSnapshot = props.useChat;
-      const chat = useChatSnapshot ? useChatSnapshot((snapshot) => snapshot) : undefined;
-      const spokenRef = useRef(new Map());
+      const chat = props.chat;
+      // The Host hands the seats a translator of their own; the fallback
+      // keeps the plugin's own language when there is none.
+      const t = props.t ?? ((key) => zh[key] ?? key);
+      // What is known about every sentence of every reply: whether it was
+      // read out, whether it is on its way, and how often it failed.
+      const recordsRef = useRef(new Map());
+      // The sentences of every reply, so that a render that has nothing new
+      // to say does not cut the same text into sentences all over again.
+      const splitsRef = useRef(new Map());
       const chainRef = useRef(Promise.resolve());
       const baselineRef = useRef(null);
       // The last barge-in the listener has already accounted for.
       const seenInterruptRef = useRef(0);
       const skipRef = useRef(0);
       const [, force] = useState(0);
+      // A sentence that failed is tried again after a pause. The retry
+      // brings the listener back, so the attempt is worth a tick of its own.
+      const [retryTick, setRetryTick] = useState(0);
+
+      // What the read-out depends on, read while rendering: the
+      // conversation itself, the switch in the toolbar, the mode, and the
+      // voice. The scan below runs when one of them changes, not on every
+      // render of the page.
+      const fingerprint = chatFingerprint(chat);
+      const speakOn = readFlag(STORAGE.enabled, true);
+      const mode = engine.config?.speakMode ?? 'head-tail';
+      const voice = readString(STORAGE.voice, '') || engine.config?.voice || '';
 
       useEffect(() => subscribe(() => force((value) => value + 1)), [subscribe]);
 
@@ -4243,13 +4379,11 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
       useEffect(() => () => speaker.stop(), [speaker]);
 
       useEffect(() => {
-        if (!readFlag(STORAGE.enabled, true)) return;
+        if (!speakOn) return undefined;
         const nodes = chatNodes(chat);
-        let hasSettled = false;
         let maxAnchor = 0;
         for (const node of nodes) {
           if (node.kind !== 'assistant-step') continue;
-          if (node.data?.status === 'settled') hasSettled = true;
           const anchor = node.anchorSeq ?? 0;
           if (anchor > maxAnchor) maxAnchor = anchor;
         }
@@ -4263,13 +4397,13 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
           const settledAnchor = historyAnchor(nodes);
           baselineRef.current = settledAnchor;
           skipRef.current = settledAnchor;
-          return;
+          return undefined;
         }
         if (engine.interruptSeq !== seenInterruptRef.current) {
           // The user barged in: the rest of that reply is not read out.
           seenInterruptRef.current = engine.interruptSeq;
           skipRef.current = maxAnchor;
-          return;
+          return undefined;
         }
         const jobs = [];
         for (const node of nodes) {
@@ -4278,52 +4412,107 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
           if (anchor <= skipRef.current) continue;
           const data = node.data ?? {};
           if (data.status === 'interrupted') continue;
-          const text = cleanReplyText(
-            (data.blocks ?? [])
-              .filter((block) => block.kind === 'text')
-              .map((block) => block.text)
-              .join('\n'),
-            2000,
-          );
-          if (text.length < 2) continue;
-          const settled = data.status === 'settled';
-          const { sentences, partial } = splitSentences(text);
-          const speakable = settled && partial !== null ? [...sentences, partial] : sentences;
-          // The trail of what was already spoken is kept by content, not by
-          // count: the set of sentences changes shape when the reply settles
-          // (the closing sentence joins them), so counting would speak the
-          // opening sentence a second time.
-          const spoken = spokenRef.current.get(node.key) ?? new Set();
-          const mode = engine.config?.speakMode ?? 'head-tail';
-          for (const sentence of pickSpoken(speakable, mode, settled, spoken)) {
-            spoken.add(sentence);
-            jobs.push({ anchor, key: node.key, index: 0, sentence });
+          // Cleaning a reply and cutting it into sentences costs a pass of
+          // regular expressions over the whole text, and this listener
+          // renders whenever the engine ticks. The result is therefore kept
+          // per reply and only computed again when that reply's own text
+          // changed — which is what makes the difference between a render
+          // that has something to say and one that does not.
+          const raw = (data.blocks ?? [])
+            .filter((block) => block.kind === 'text')
+            .map((block) => block.text)
+            .join('\n');
+          const cached = splitsRef.current.get(node.key);
+          let sentences;
+          let partial;
+          if (cached !== undefined && cached.raw === raw) {
+            sentences = cached.sentences;
+            partial = cached.partial;
+          } else {
+            const text = cleanReplyText(raw, 2000);
+            if (text.length < 2) {
+              splitsRef.current.delete(node.key);
+              continue;
+            }
+            const split = splitSentences(text);
+            sentences = split.sentences;
+            partial = split.partial;
+            splitsRef.current.set(node.key, { raw, sentences, partial });
           }
-          spokenRef.current.set(node.key, spoken);
+          const settled = data.status === 'settled';
+          const speakable = settled && partial !== null ? [...sentences, partial] : sentences;
+          // The trail of what was already spoken is kept per sentence, and
+          // the place the sentence holds in the reply is part of its name:
+          // the set of sentences changes shape when the reply settles (the
+          // closing sentence joins them), and the same words can appear
+          // twice in one reply.
+          const record = recordsRef.current.get(node.key) ?? new Map();
+          recordsRef.current.set(node.key, record);
+          const spoken = spokenKeys(record);
+          for (const entry of pickEntries(speakable, mode, settled, spoken)) {
+            const known = record.get(entry.key);
+            // A sentence that failed is worth another try: the service may
+            // have been busy for a moment. The tries are counted, so a
+            // sentence that keeps failing is not retried for ever.
+            if (known !== undefined && known.state === 'failed' && !canRetry(known)) continue;
+            record.set(entry.key, pendingState(known));
+            jobs.push({
+              anchor,
+              key: node.key,
+              index: entry.index,
+              sentence: entry.text,
+              speechKey: entry.key,
+              record,
+            });
+          }
         }
-        if (jobs.length === 0) return;
+        // A sentence that failed is tried again after a pause: the read-out
+        // must not stop for good because the service was busy for a moment.
+        // The timer is armed before anything else, because a retry that is
+        // not due yet is exactly the case where there is no work to do.
+        const wait = retryDelay(recordsRef.current);
+        const timer = wait === null
+          ? 0
+          : window.setTimeout(() => setRetryTick((value) => value + 1), wait + 20);
+        const cleanup = () => {
+          if (timer !== 0) window.clearTimeout(timer);
+        };
+        if (jobs.length === 0) return cleanup;
         jobs.sort((a, b) => a.anchor - b.anchor || a.index - b.index);
-        const voice = readString(STORAGE.voice, '') || engine.config?.voice || '';
         // The chain watches the barge-in counter: a reply that was cut short
         // must not be read out to the end afterwards.
         const chainSeq = engine.interruptSeq;
         chainRef.current = jobs.reduce(
           (chain, job) =>
             chain.then(async () => {
-              if (engine.interruptSeq !== chainSeq || !readFlag(STORAGE.enabled, true)) return;
+              const record = job.record;
+              if (engine.interruptSeq !== chainSeq || !readFlag(STORAGE.enabled, true)) {
+                // The sentence was dropped before it was spoken: it stays free
+                // to be picked up again.
+                record.set(job.speechKey, releasedState(record.get(job.speechKey)));
+                return;
+              }
               const controller = new AbortController();
               engine.ttsController = controller;
               try {
                 const audio = await client.tts(job.sentence, voice, controller.signal);
-                if (engine.interruptSeq !== chainSeq) return;
+                if (engine.interruptSeq !== chainSeq) {
+                  record.set(job.speechKey, releasedState(record.get(job.speechKey)));
+                  return;
+                }
                 speaker.enqueue(audio);
+                record.set(job.speechKey, spokenState(record.get(job.speechKey)));
                 // Speaking again means the failure is behind us. A persistent
                 // problem — an unset key, say — simply reports itself once more.
                 if (engine.error !== null) setEngine({ error: null });
               } catch (error) {
                 if (error?.name !== 'AbortError') {
                   console.error('[voice-chat] TTS failed:', error);
-                  const message = `朗读失败：${error.message ?? error}`;
+                  const state = failedState(record.get(job.speechKey));
+                  record.set(job.speechKey, state);
+                  // The failure is shown, and it says what happens next: the
+                  // sentence is tried again once, and then it is given up on.
+                  const message = `${t('errSpeak')}：${error.message ?? error}（${state.exhausted ? t('speakRetrySpent') : t('speakRetry')}）`;
                   setEngine({ error: message });
                   // The host keeps the trail: a failure that only ever shows
                   // up in the browser would otherwise be gone with the tab.
@@ -4335,7 +4524,12 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
             }),
           chainRef.current,
         );
-      });
+        return cleanup;
+        // The scan runs when the conversation, the switch, the mode or the
+        // voice changed — and when a failed sentence is due again. It does
+        // not run on every render of the page: a long conversation would
+        // otherwise be walked again and again for nothing.
+      }, [fingerprint, speakOn, mode, voice, engine.interruptSeq, retryTick]);
 
       return null;
     }
@@ -4348,24 +4542,47 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
       apply,
       __internals: {
         splitSentences,
+        isSentenceStop,
+        isPunctuationOnly,
         historyAnchor,
         sliderToThreshold,
         thresholdToSlider,
         PROVIDER_ID_PATTERN,
         cleanReplyText,
         pickSpoken,
+        pickEntries,
+        sentenceKey,
+        chatFingerprint,
+        spokenKeys,
+        pendingState,
+        spokenState,
+        failedState,
+        releasedState,
+        canRetry,
+        retryDelay,
+        MAX_SPEECH_ATTEMPTS,
+        SPEECH_RETRY_DELAY_MS,
         chatNodes,
         viewportBounds,
         clampPosition,
         snapToEdge,
         attachTo,
         refit,
+        settleDrag,
         nearestEdge,
         dockLayout,
         dockCentre,
         waveRadius,
         panelLimits,
         alertPlacement,
+        boundsFor,
+        readError,
+        preparePoll,
+        sameSession,
+        recorderOptions,
+        installStarted,
+        installFailed,
+        PREPARE_TIMEOUT_MS,
       },
     };
   },
