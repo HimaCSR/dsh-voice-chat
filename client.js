@@ -1896,6 +1896,113 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
       return `${horizontal.join(' ')} / ${vertical.join(' ')}`;
     }
 
+    // ─────────────────────────────────────────────────────── small pure helpers
+
+    /** How long the model preparation may run before the poll gives up. */
+    const PREPARE_TIMEOUT_MS = 30 * 60 * 1000;
+
+    /** How often the preparation is asked for its progress. */
+    const PREPARE_POLL_MS = 1500;
+
+    /**
+     * What the preparation poll does next.
+     *
+     * @param {object} state - the state of the poll.
+     * @param {boolean} state.aborted - whether the plugin went away.
+     * @param {boolean} state.running - whether the host is still working.
+     * @param {number} state.elapsedMs - how long the run has been going.
+     * @param {number} state.limitMs - how long it may go on.
+     * @returns {'wait'|'done'|'timeout'|'stopped'} the next step.
+     */
+    function preparePoll(state) {
+      if (state.aborted === true) return 'stopped';
+      if (state.running !== true) return 'done';
+      if (state.elapsedMs > state.limitMs) return 'timeout';
+      return 'wait';
+    }
+
+    /**
+     * A pause that can be cut short.
+     *
+     * @param {number} ms - how long to wait.
+     * @param {AbortSignal} [signal] - the signal that ends the wait.
+     * @returns {Promise<void>} the promise of the wait.
+     */
+    function delay(ms, signal) {
+      return new Promise((resolve) => {
+        const timer = setTimeout(resolve, ms);
+        const stop = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        if (signal !== undefined && signal !== null) {
+          if (signal.aborted) {
+            stop();
+            return;
+          }
+          signal.addEventListener?.('abort', stop, { once: true });
+        }
+      });
+    }
+
+    /**
+     * Whether an utterance that was recorded in one session may still be
+     * delivered.
+     *
+     * The seat is mounted per session, and the microphone may still be open
+     * when the user switches to another conversation. The words were spoken
+     * in the old one, so they must not be sent to the new one.
+     *
+     * @param {string|undefined} recorded - the session the recorder was opened in.
+     * @param {string|undefined} current - the session the plugin is bound to now.
+     * @returns {boolean} whether the utterance still belongs there.
+     */
+    function sameSession(recorded, current) {
+      if (recorded === undefined || recorded === null) return false;
+      if (current === undefined || current === null) return false;
+      return recorded === current;
+    }
+
+    /**
+     * The options one recorder gets.
+     *
+     * Each recorder gets a copy: the callbacks belong to the recorder that
+     * was opened, and writing them into the shared options would overwrite
+     * the previous recorder's callbacks and grow the object for every
+     * recording.
+     *
+     * @param {object} shared - the engine's options.
+     * @param {object} callbacks - this recorder's callbacks.
+     * @returns {object} the options for this recorder.
+     */
+    function recorderOptions(shared, callbacks) {
+      return { ...(shared ?? {}), ...(callbacks ?? {}) };
+    }
+
+    /**
+     * The install state of a dependency that is being installed.
+     *
+     * @param {string} name - the dependency.
+     * @returns {object} the state the panel shows.
+     */
+    function installStarted(name) {
+      return { running: true, name, output: [], error: null };
+    }
+
+    /**
+     * The install state of a dependency whose installation failed.
+     *
+     * The run is over: the panel must not sit there saying "installing…" for
+     * ever, and the button has to come back so the user can try again.
+     *
+     * @param {string} name - the dependency.
+     * @param {string} message - why it failed.
+     * @returns {object} the state the panel shows.
+     */
+    function installFailed(name, message) {
+      return { running: false, name, output: [], error: String(message ?? '') };
+    }
+
     // ────────────────────────────────────────────────────────────────── plugin
 
     /** Services this browser plugin needs before it may mount. */
@@ -2021,27 +2128,47 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
        * Kick off the model download and follow it to completion. The route
        * answers immediately so a multi-minute download never looks like a hung
        * request, which means progress has to be polled.
+       *
+       * The poll has a life of its own: it stops when the plugin goes away,
+       * and it gives up after a while instead of following a download that
+       * will never finish.
        */
       async function prepare() {
-        setEngine({ error: null, preparing: true });
+        setEngine({ error: null });
+        const controller = new AbortController();
+        engine.prepareController = controller;
+        const startedAt = Date.now();
         try {
           await api.prepare();
         } catch (error) {
-          setEngine({ preparing: false, error: `模型准备失败：${error.message ?? error}` });
+          if (engine.prepareController === controller) engine.prepareController = null;
+          setEngine({ error: `${t('errModelPrepare')}：${error.message ?? error}` });
           return;
         }
-        const deadline = Date.now() + 60 * 60 * 1000;
         for (;;) {
           const state = await refreshState();
           const phase = state?.prepare ?? {};
           setEngine({
             prepare: phase,
-            error: phase.error ? `模型准备失败：${phase.error}` : null,
+            error: phase.error ? `${t('errModelPrepare')}：${phase.error}` : null,
           });
-          if (!phase.running || Date.now() > deadline) break;
-          await new Promise((resolve) => setTimeout(resolve, 1500));
+          const decision = preparePoll({
+            aborted: !alive || controller.signal.aborted,
+            running: phase.running === true,
+            elapsedMs: Date.now() - startedAt,
+            limitMs: PREPARE_TIMEOUT_MS,
+          });
+          if (decision === 'stopped') break;
+          if (decision === 'done') break;
+          if (decision === 'timeout') {
+            // The download is still running on the host, but the panel must
+            // not wait for it for ever: the user is told what happened.
+            setEngine({ error: t('errModelTimeout') });
+            break;
+          }
+          await delay(PREPARE_POLL_MS, controller.signal);
         }
-        setEngine({ preparing: false });
+        if (engine.prepareController === controller) engine.prepareController = null;
         await refreshState();
       }
 
@@ -2054,18 +2181,35 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
         engine.interruptSeq += 1;
       }
 
-      /** Deliver a recognized sentence through the session-scoped prompt API. */
-      async function sendText(text) {
+      /**
+       * Deliver a recognized sentence through the session-scoped prompt API.
+       *
+       * @param {string} text - what was said.
+       * @param {string|undefined} recordedSession - the session the recorder
+       *        was opened in. The words belong to that conversation, and a
+       *        conversation that is not the one any more must not receive
+       *        them.
+       */
+      async function sendText(text, recordedSession) {
         const sessionId = engine.sessionId;
-        if (sessionId === undefined) throw new Error('没有活动会话');
+        if (sessionId === undefined) throw new Error(t('errNoSession'));
+        if (!sameSession(recordedSession ?? sessionId, sessionId)) {
+          // The user switched conversations while the microphone was open.
+          // The sentence was spoken in the old one, so it is dropped instead
+          // of being sent to a conversation nobody said it in.
+          const message = t('errSessionChanged');
+          setEngine({ error: message });
+          void api.reportError?.('session', message, '');
+          return;
+        }
         const binding = ctx.sessions.binding(sessionId);
         const session = binding?.session;
-        if (session === undefined) throw new Error('会话不可用');
+        if (session === undefined) throw new Error(t('errSessionGone'));
         const running = session.getSnapshot?.()?.running === true;
         const mode = running && readFlag(STORAGE.interrupt, true) ? 'steer' : 'queue';
         const result = await session.prompt([{ type: 'text', text }], mode);
         if (result && result.ok === false) {
-          throw new Error(result.error?.message ?? '发送失败');
+          throw new Error(result.error?.message ?? t('errSendFailed'));
         }
       }
 
@@ -2092,14 +2236,21 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
         return buffer;
       }
 
-      async function recognize(pcm) {
+      /**
+       * Recognize one utterance and send it on.
+       *
+       * @param {ArrayBuffer} pcm - the recorded audio.
+       * @param {string|undefined} recordedSession - the session the recorder
+       *        was opened in.
+       */
+      async function recognize(pcm, recordedSession) {
         // One utterance at a time. The microphone keeps collecting while a
         // recognition is in flight, so a second utterance can arrive before
         // the first one has been sent. Running them together would let the
         // slower one overtake the other, and the sentences would reach the
         // conversation in the wrong order.
         if (engine.recognizing) {
-          engine.pendingUtterances.push(pcm);
+          engine.pendingUtterances.push({ pcm, recordedSession });
           return;
         }
         engine.recorder?.setPaused(true);
@@ -2110,13 +2261,13 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
           const language = readString(STORAGE.language, '') || engine.config?.language || 'auto';
           const result = await api.stt(normalizeUtterance(pcm), language);
           const text = String(result.text ?? '').trim();
-          if (text.length > 0) await sendText(text);
+          if (text.length > 0) await sendText(text, recordedSession);
         } catch (error) {
-          const message = `识别失败：${error.message ?? error}`;
+          const message = `${t('errRecognize')}：${error.message ?? error}`;
           setEngine({ error: message });
           // The host keeps the trail: a failure that only ever shows up in
           // the browser would otherwise be gone with the tab.
-          void client.reportError?.('stt', message, String(error?.stack ?? '').slice(0, 500));
+          void api.reportError?.('stt', message, String(error?.stack ?? '').slice(0, 500));
         } finally {
           const next = engine.pendingUtterances.shift();
           if (next === undefined) {
@@ -2125,7 +2276,7 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
           } else {
             // The next utterance is already waiting: keep the microphone
             // paused and carry straight on with it.
-            void recognize(next);
+            void recognize(next.pcm, next.recordedSession);
           }
         }
       }
@@ -2140,20 +2291,26 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
         if (engine.starting) return;
         engine.starting = true;
         if (sessionId !== undefined) engine.sessionId = sessionId;
-        // The recorder shares the engine's options object rather than a copy,
-        // so a threshold changed in the settings panel reaches the open
-        // microphone straight away.
-        const recorder = new MicCapture(Object.assign(engine.options, {
-          onUtterance: (pcm) => void recognize(pcm),
+        // The session is remembered as it is now: the words that are recorded
+        // from here on belong to this conversation, whatever happens to the
+        // seat in between.
+        const recordedSession = engine.sessionId;
+        engine.recordedSessionId = recordedSession;
+        // Every recorder gets its own copy of the options. The callbacks
+        // belong to the recorder that is being opened, and writing them
+        // into the shared object would overwrite the previous recorder's
+        // callbacks and grow the object for every recording.
+        const recorder = new MicCapture(recorderOptions(engine.options, {
+          onUtterance: (pcm) => void recognize(pcm, recordedSession),
           onBargeIn: () => interruptReply(),
           onSpeakingChange: (speaking) => setEngine({ listening: speaking ? 'speech' : 'open' }),
         }));
         try {
           await recorder.start();
         } catch (error) {
-          const message = `无法打开麦克风：${error.message ?? error}`;
+          const message = `${t('errMicOpen')}：${error.message ?? error}`;
           setEngine({ error: message });
-          void client.reportError?.('microphone', message, String(error?.stack ?? '').slice(0, 500));
+          void api.reportError?.('microphone', message, String(error?.stack ?? '').slice(0, 500));
           return;
         } finally {
           engine.starting = false;
@@ -2189,6 +2346,16 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
 
       ctx.effect(() => () => stopListening(), 'voice-chat: microphone');
 
+      // The plugin has a life of its own: when it goes away, the polls that
+      // run in the background have to go with it. The flag says so, and the
+      // abort signal cuts the wait short.
+      let alive = true;
+      ctx.effect(() => () => {
+        alive = false;
+        engine.prepareController?.abort();
+        engine.prepareController = null;
+      }, 'voice-chat: model preparation');
+
       const shared = {
         engine,
         api,
@@ -2200,7 +2367,6 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
         startListening,
         stopListening,
         interruptReply,
-        notify,
       };
 
       // `inject` receives the slot's session-scope key, so each seat knows the
@@ -2276,9 +2442,13 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
       if (ceilingElement === null || ceilingElement === undefined) return rect;
       const ceiling = rectOf(ceilingElement).y;
       if (!Number.isFinite(ceiling) || ceiling <= rect.y) return rect;
+      // The space above the composer is what the bead may use, and nothing
+      // more. The lower bound shrinks with it: a fixed minimum of 160 pushed
+      // the bead over the composer whenever the window was shorter than that.
+      const available = Math.max(0, ceiling - rect.y - ORB_MARGIN);
       return {
         ...rect,
-        height: Math.max(160, Math.min(rect.height, ceiling - rect.y - ORB_MARGIN)),
+        height: Math.min(rect.height, available),
       };
     }
 
@@ -2424,6 +2594,22 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
         return attachTo(edge, current, bounds);
       }
       return { ...clampPosition(current, bounds), edge: null };
+    }
+
+    /**
+     * Where the bead comes to rest when the pointer is let go.
+     *
+     * Released anywhere, the bead travels to the nearest edge and sticks.
+     * Dropped in open space it stays exactly there and keeps its round shape:
+     * only a genuine collision sticks and sags.
+     *
+     * @param {{x: number, y: number}} released - where the bead was let go.
+     * @param {object} [bounds] - the movable area.
+     * @returns {{x: number, y: number, edge: string|null}} the resting place.
+     */
+    function settleDrag(released, bounds = viewportBounds()) {
+      const snapped = snapToEdge(released, bounds);
+      return snapped === null ? { ...released, edge: null } : snapped;
     }
 
     /** The edge of the movable area the bead sits closest to. */
@@ -2664,7 +2850,7 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
       const [, force] = useState(0);
       const [panel, setPanel] = useState(false);
       const [open, setOpen] = useState(false);
-      const [tick, setTick] = useState(0);
+      const [, setTick] = useState(0);
       const [position, setPosition] = useState(() => ({ ...defaultOrbPosition(), edge: null }));
       const [bounds, setBounds] = useState(() => viewportBounds());
       const [dragging, setDragging] = useState(false);
@@ -2928,12 +3114,24 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
         root.style.top = `${next.y}px`;
       };
 
-      const onPointerUp = (event) => {
+      /**
+       * Finish a drag, however it ended.
+       *
+       * The pointer can be let go, or the system can take it away — a call
+       * comes in, a notification takes the focus. A cancelled gesture has to
+       * clean up just like a finished one, or the bead keeps the drag state
+       * for ever and the layout stops following the area it lives in.
+       *
+       * @param {PointerEvent} event - the pointer event that ended the drag.
+       * @param {boolean} cancelled - whether the gesture was interrupted.
+       */
+      const finishDrag = (event, cancelled) => {
         const drag = dragRef.current;
         if (drag === null || drag.id !== event.pointerId) return;
         dragRef.current = null;
         if (!drag.moved) {
-          setOpen(!drag.wasOpen);
+          // A cancelled gesture is not a tap: the beads stay as they are.
+          if (!cancelled) setOpen(!drag.wasOpen);
           return;
         }
         setDragging(false);
@@ -2945,12 +3143,14 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
           x: Number.isFinite(left) ? left : drag.originX,
           y: Number.isFinite(top) ? top : drag.originY,
         }, bounds);
-        const snapped = snapToEdge(released, bounds);
-        // Null means it was dropped in open space: it stays exactly there and
-        // keeps its round shape. Only a genuine collision sticks and sags.
-        setPosition(snapped === null ? { ...released, edge: null } : snapped);
-        persistPosition(snapped === null ? released : snapped, bounds, snapped?.edge ?? null);
+        const resting = settleDrag(released, bounds);
+        setPosition(resting);
+        persistPosition(resting, bounds, resting.edge);
       };
+
+      const onPointerUp = (event) => finishDrag(event, false);
+
+      const onPointerCancel = (event) => finishDrag(event, true);
 
       const toggleMic = useCallback(() => {
         if (listening) stopListening();
@@ -2969,14 +3169,13 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
       };
 
       // The four functions and nothing else: the cloned voice's name used to sit
-      // on the toolbar and now lives in the settings panel instead.
+      // on the toolbar and now lives in the settings panel instead. Where a
+      // bead comes to rest is not decided here — the dock layout owns that.
       const beads = [
         {
           key: 'mic',
           icon: 'mic',
           label: t('mic'),
-          tx: -138,
-          ty: -8,
           on: listening,
           tone: listening ? (engine.recognizing ? 'warn' : 'record') : null,
           title: listening ? t('micStop') : t('micTitle'),
@@ -2987,8 +3186,6 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
           key: 'speak',
           icon: 'speaker',
           label: t('speak'),
-          tx: -94,
-          ty: -46,
           on: speakEnabled,
           tone: null,
           title: t('speak'),
@@ -2999,8 +3196,6 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
           key: 'mode',
           icon: interruptMode ? 'bolt' : 'clock',
           label: interruptMode ? t('interruptShort') : t('queueShort'),
-          tx: -46,
-          ty: -68,
           on: interruptMode,
           tone: null,
           title: interruptMode ? t('interrupt') : t('queue'),
@@ -3011,8 +3206,6 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
           key: 'settings',
           icon: 'gear',
           label: t('settingsShort'),
-          tx: 4,
-          ty: -72,
           on: panel,
           tone: null,
           title: t('settings'),
@@ -3063,6 +3256,7 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
                 onPointerDown,
                 onPointerMove,
                 onPointerUp,
+                onPointerCancel,
                 onKeyDown: (event) => {
                   if (event.key !== 'Enter' && event.key !== ' ') return;
                   event.preventDefault();
@@ -3220,6 +3414,63 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
         height: sheetHeight === 0 ? undefined : sheetHeight,
       });
 
+      // Everything the rest of the panel reads is derived here, above the
+      // callbacks that use it. The order used to matter — a callback could
+      // reach for a value that was only declared further down — and that is
+      // exactly the kind of fragility that breaks silently.
+      const voices = engine.voices ?? [];
+      const presets = engine.presets ?? [];
+      // The stored language wins; without one the Host's own setting is used,
+      // and the panel shows what is really in force.
+      const language = readString(STORAGE.language, '') || config.language || 'auto';
+      const live = statusLine(engine, t);
+      const readiness = engine.ready === true
+        ? { tone: 'on', text: t('ready') }
+        : engine.ready === false
+          ? { tone: 'warn', text: config.vadNote ? `${t('notReady')} · ${config.vadNote}` : t('notReady') }
+          : { tone: 'quiet', text: '…' };
+
+      // The provider the replies are read with. The list is fetched when the
+      // tab is opened, because most sessions never need it.
+      const providerList = providers ?? engine.providers ?? [];
+      const selectedProvider = providerList.find((entry) => entry.id === config.provider) ?? null;
+      const cloneSupported = selectedProvider?.clone === true;
+      // Some services match the sample against its transcript, so for them
+      // the words are part of the clone and not a nicety.
+      const cloneNeedsTranscript = selectedProvider?.cloneNeedsTranscript === true;
+
+      // The form is only there while it is being used: it opens on "edit the
+      // service in use" or on "add a service", and closing it puts it away
+      // again.
+      const form = providerForm;
+      const providerFormReady = form === null
+        ? false
+        : form.existing === true || PROVIDER_ID_PATTERN.test(form.id.trim());
+      // A new provider needs an id the Host will accept; an existing one has
+      // its id already and cannot change it. The key is left out on purpose:
+      // it is never handed back to the browser, and the form has its own
+      // field for it.
+      const providerFormFrom = (entry) => ({
+        id: entry.id,
+        label: entry.label ?? '',
+        kind: entry.kind ?? 'openai-speech',
+        baseUrl: entry.baseUrl ?? '',
+        model: entry.model ?? '',
+        voice: entry.voice ?? '',
+        format: entry.format ?? 'wav',
+        apiKey: '',
+        apiKeyEnv: entry.apiKeyEnv ?? '',
+        clone: entry.clone === true,
+        existing: true,
+      });
+      // Whether a service can clone a voice is the Host's business: it
+      // decides from the wire format, and what is shown here is only a
+      // report of what it said. The box is therefore read-only — a switch
+      // that looks real and does nothing is worse than no switch at all.
+      const cloneCapability = providerList
+        .find((entry) => entry.kind === (form?.kind ?? 'openai-speech'))?.clone
+        ?? (form?.existing === true ? form.clone === true : false);
+
       // A folded section opening makes the sheet taller and `fitPanel` has to hear
       // about it, or the sheet hangs off the area it is meant to fit inside. Only
       // the height is measured: taking the width from a measurement would resize
@@ -3314,25 +3565,6 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
         }
         area.remove();
       };
-
-      const voices = engine.voices ?? [];
-      const presets = engine.presets ?? [];
-      const language = readString(STORAGE.language, 'auto');
-      const live = statusLine(engine, t);
-      const readiness = engine.ready === true
-        ? { tone: 'on', text: t('ready') }
-        : engine.ready === false
-          ? { tone: 'warn', text: config.vadNote ? `${t('notReady')} · ${config.vadNote}` : t('notReady') }
-          : { tone: 'quiet', text: '…' };
-
-      // The provider the replies are read with. The list is fetched when the
-      // tab is opened, because most sessions never need it.
-      const providerList = providers ?? engine.providers ?? [];
-      const selectedProvider = providerList.find((entry) => entry.id === config.provider) ?? null;
-      const cloneSupported = selectedProvider?.clone === true;
-      // Some services match the sample against its transcript, so for them
-      // the words are part of the clone and not a nicety.
-      const cloneNeedsTranscript = selectedProvider?.cloneNeedsTranscript === true;
 
       // Load the provider list and the dependency report the first time the
       // advanced tab is shown, so opening the sheet stays cheap.
@@ -3595,31 +3827,6 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
       // ── tab: advanced — the TTS service, the microphone, and the two
       // housekeeping sections: diagnostics with the dependency audit, and the
       // version check.
-      // A new provider needs an id the Host will accept; an existing one has
-      // its id already and cannot change it.
-      // The shape the form starts from when it is pointed at a known service.
-      // The key is left out on purpose: it is never handed back to the
-      // browser, and the form has its own field for it.
-      const providerFormFrom = (entry) => ({
-        id: entry.id,
-        label: entry.label ?? '',
-        kind: entry.kind ?? 'openai-speech',
-        baseUrl: entry.baseUrl ?? '',
-        model: entry.model ?? '',
-        voice: entry.voice ?? '',
-        format: entry.format ?? 'wav',
-        apiKey: '',
-        apiKeyEnv: entry.apiKeyEnv ?? '',
-        clone: entry.clone === true,
-        existing: true,
-      });
-      // The form is only there while it is being used: it opens on "edit
-      // the service in use" or on "add a service", and closing it puts it
-      // away again.
-      const form = providerForm;
-      const providerFormReady = form === null
-        ? false
-        : form.existing === true || PROVIDER_ID_PATTERN.test(form.id.trim());
       const providerFormView = form === null ? null : h('details', {
         style: styles.section,
         // React re-renders the open attribute, so the browser's own toggle
