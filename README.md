@@ -380,6 +380,7 @@ tts:
   apiKeyEnv: MIMO_API_KEY
   maxChars: 1200           # 单次朗读文本上限
   persona: ''              # 人物设定：怎么讲话、讲什么内容
+  speakMode: head-tail     # 读什么：head-tail | all | head | tail
   providers: {}            # 用户自建的供应商表，按 id 索引
 update:
   manifestUrl: ''          # 自定义发布清单地址；留空则查 GitHub Releases
@@ -404,6 +405,18 @@ update:
 
 - **人物设定**（`tts.persona`）管的是**说什么**。它被注入到 harness 的系统提示里，因此对话时就按这个人设来。
 - **语气指令**（`tts.instruction`）管的是**怎么念**。写法见 MiMo 官方的「导演模式」三段式 ——【角色】/【场景】/【指导】；情绪标签如 `(开心)`、`[叹气]` 写在要读的那句里。克隆音色同样受语气指令管辖。
+- **语音播报**（`tts.speakMode`）管的是**读出来什么**，设置面板的「人物设定」页里选：
+
+  | 取值 | 读什么 |
+  |---|---|
+  | `head-tail`（默认） | 只读**首句**和**尾句**，中间的沉默 |
+  | `all` | 整段回复都读出来 |
+  | `head` | 只读首句 |
+  | `tail` | 只读尾句 |
+
+  **思考过程从来不会被读出来** —— 朗读只取回复里的正文块，推理与工具调用不在其中。
+
+  默认之所以是「首尾」：一句回答常常有十几秒，全读出来等于让用户等一个把屏幕上已经写好的内容再念一遍的声音。尾句要等回复生成完才知道，所以它会晚一点出声。
 
 浏览器侧的偏好存在 localStorage：`dsh.voice.enabled`（朗读）、`dsh.voice.interrupt`（插话/排队）、`dsh.voice.voice`（音色）、`dsh.voice.language`（识别语言）、`dsh.voice.sensitivity`（打断灵敏度，0–100）、`dsh.voice.minRms`（最小音量，0–100）。
 

@@ -98,6 +98,9 @@ const DEFAULTS = {
 };
 
 /** Keys the settings UI may change at runtime, and their allowed shape. */
+/** The ways a reply can be read out. */
+const SPEAK_MODES = ['head-tail', 'all', 'head', 'tail'];
+
 const MUTABLE = {
   voice: 'tts.voice',
   apiKey: 'tts.apiKey',
@@ -111,6 +114,9 @@ const MUTABLE = {
   vadBackend: 'stt.vadBackend',
   // The conversation persona, injected into the harness system prompt.
   persona: 'tts.persona',
+  // Which parts of a reply are spoken out. The value is checked before it
+  // is written, so a stray string cannot land in the configuration.
+  speakMode: 'tts.speakMode',
   // A custom update source; empty means the default GitHub Releases lookup.
   updateUrl: 'update.manifestUrl',
 };
@@ -300,6 +306,9 @@ export function apply(ctx, rawConfig = {}) {
       // effect instead of an empty box that would overwrite it on save.
       instruction: selected?.instruction ?? config.tts.instruction ?? '',
       persona: config.tts.persona ?? '',
+      // Which parts of a reply are spoken out. The default reads the
+      // opening and the closing sentence only.
+      speakMode: SPEAK_MODES.includes(config.tts.speakMode) ? config.tts.speakMode : 'head-tail',
       // Whether the persona actually reached the system prompt, and why not
       // if it did not: a persona that silently fails to register looks
       // exactly like a persona the model is ignoring.
@@ -464,6 +473,7 @@ export function apply(ctx, rawConfig = {}) {
         continue;
       }
       if (value !== null && typeof value !== 'string') continue;
+      if (key === 'speakMode' && !SPEAK_MODES.includes(value)) continue;
       next[key] = value;
       setPath(config, dotted, value);
     }

@@ -732,6 +732,45 @@ registerProcessor('voice-chat-mic', MicCapture);
       return { sentences, partial: partial === '' || isTrivial(partial) ? null : partial };
     }
 
+    /**
+     * Choose the sentences that are actually spoken.
+     *
+     * The default reads only the opening and the closing sentence. A reply
+     * is usually longer than it needs to be, and reading all of it out loud
+     * makes the user wait for a voice that repeats what the screen already
+     * says. The closing sentence is only known once the reply has settled,
+     * so it is held back until then.
+     *
+     * @param {string[]} speakable - the sentences of the reply, in order.
+     * @param {string} mode - one of head-tail, all, head, tail.
+     * @param {boolean} settled - whether the reply has finished streaming.
+     * @param {Set<string>} spoken - the sentences already spoken.
+     * @returns {string[]} the sentences to speak now.
+     */
+    function pickSpoken(speakable, mode, settled, spoken) {
+      if (speakable.length === 0) return [];
+      // A one-sentence reply is both the first and the last sentence, so the
+      // choice is collected through one place that refuses to say the same
+      // sentence twice.
+      const out = [];
+      const take = (sentence) => {
+        if (sentence === undefined || spoken.has(sentence) || out.includes(sentence)) return;
+        out.push(sentence);
+      };
+      if (mode === 'all') {
+        speakable.forEach(take);
+        return out;
+      }
+      const first = speakable[0];
+      const last = speakable[speakable.length - 1];
+      if (mode === 'head' || mode === 'head-tail') take(first);
+      // The closing sentence is only known once the reply has settled.
+      if (mode === 'tail' || mode === 'head-tail') {
+        if (settled) take(last);
+      }
+      return out;
+    }
+
     /** Strip markdown, code fences and URLs so the reader never speaks markup. */
     function cleanReplyText(text, maxChars) {
       const limit = maxChars ?? 600;
@@ -823,6 +862,12 @@ registerProcessor('voice-chat-mic', MicCapture);
       sampleVoice: '试听',
       defaultVoice: '默认音色',
       // ── persona ────────────────────────────────────────────────────────────
+      speakModeTitle: '语音播报',
+      speakModeHeadTail: '只播首句和尾句',
+      speakModeAll: '播报全文',
+      speakModeHead: '只播首句',
+      speakModeTail: '只播尾句',
+      speakModeHint: '这一项只决定「读出来什么」：思考过程永远不读，回复的其余部分是否出声由这里决定。上面的人设文本仍然管「怎么回答」。',
       personaTitle: '对话人设',
       personaHint: '决定助手「怎么讲话、讲什么内容」。例如：用户问一句答一句；回答较长时先给一句总结。这是给对话模型的指示，不影响音色。',
       personaPlaceholder: '例如：这是语音对话，用户问一句你答一句；回答内容较多时，先用一两句话讲清要点，再补一句「你可以看看我总结的内容」。',
@@ -966,6 +1011,12 @@ registerProcessor('voice-chat-mic', MicCapture);
       sampleVoice: 'Play',
       defaultVoice: 'Default voice',
       // ── persona ────────────────────────────────────────────────────────────
+      speakModeTitle: 'What gets read out',
+      speakModeHeadTail: 'First and last sentence only',
+      speakModeAll: 'The whole reply',
+      speakModeHead: 'First sentence only',
+      speakModeTail: 'Last sentence only',
+      speakModeHint: 'This decides what is spoken: the reasoning is never read, and this setting decides whether the rest of the reply is spoken. The persona above still decides how the reply is written.',
       personaTitle: 'Conversation persona',
       personaHint: 'Decides how the assistant talks and what it says — one answer per question, and a short summary when the answer would be long. It instructs the chat model; it does not change the voice.',
       personaPlaceholder: 'For example: this is a spoken conversation, answer one question at a time; when the answer is long, lead with a one or two sentence summary and add a line like "here is my summary".',
@@ -1723,7 +1774,11 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
           const text = String(result.text ?? '').trim();
           if (text.length > 0) await sendText(text);
         } catch (error) {
-          setEngine({ error: `识别失败：${error.message ?? error}` });
+          const message = `识别失败：${error.message ?? error}`;
+          setEngine({ error: message });
+          // The host keeps the trail: a failure that only ever shows up in
+          // the browser would otherwise be gone with the tab.
+          void client.reportError?.('stt', message, String(error?.stack ?? '').slice(0, 500));
         } finally {
           setEngine({ recognizing: false });
           engine.recorder?.setPaused(false);
@@ -1744,7 +1799,9 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
         try {
           await recorder.start();
         } catch (error) {
-          setEngine({ error: `无法打开麦克风：${error.message ?? error}` });
+          const message = `无法打开麦克风：${error.message ?? error}`;
+          setEngine({ error: message });
+          void client.reportError?.('microphone', message, String(error?.stack ?? '').slice(0, 500));
           return;
         }
         engine.recorder = recorder;
@@ -3117,6 +3174,23 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
           })),
           h('div', { style: styles.note }, t('ttsStyleTags'))),
         h('div', { style: styles.section },
+          h('div', { style: styles.sectionHead }, h('span', null, t('speakModeTitle'))),
+          h('div', { style: styles.note }, t('speakModeHint')),
+          h('div', { style: styles.row },
+            h('select', {
+              style: { ...styles.field, flex: 1 },
+              value: config.speakMode ?? 'head-tail',
+              onChange: (event) => void withBusy('保存播报方式', async () => {
+                await client.configure({ speakMode: event.target.value });
+                await refreshState();
+              }),
+            }, [
+              ['head-tail', t('speakModeHeadTail')],
+              ['all', t('speakModeAll')],
+              ['head', t('speakModeHead')],
+              ['tail', t('speakModeTail')],
+            ].map(([value, label]) => h('option', { key: value, value }, label))))),
+        h('div', { style: styles.section },
           h('div', { style: styles.sectionHead }, h('span', null, t('languageLabel'))),
           h('div', { style: styles.row },
             h('select', {
@@ -3621,15 +3695,20 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
             2000,
           );
           if (text.length < 2) continue;
+          const settled = data.status === 'settled';
           const { sentences, partial } = splitSentences(text);
-          const speakable = data.status === 'settled' && partial !== null ? [...sentences, partial] : sentences;
-          const spoken = spokenRef.current.get(node.key) ?? 0;
-          if (speakable.length > spoken) {
-            for (let index = spoken; index < speakable.length; index++) {
-              jobs.push({ anchor, key: node.key, index, sentence: speakable[index] });
-            }
-            spokenRef.current.set(node.key, speakable.length);
+          const speakable = settled && partial !== null ? [...sentences, partial] : sentences;
+          // The trail of what was already spoken is kept by content, not by
+          // count: the set of sentences changes shape when the reply settles
+          // (the closing sentence joins them), so counting would speak the
+          // opening sentence a second time.
+          const spoken = spokenRef.current.get(node.key) ?? new Set();
+          const mode = engine.config?.speakMode ?? 'head-tail';
+          for (const sentence of pickSpoken(speakable, mode, settled, spoken)) {
+            spoken.add(sentence);
+            jobs.push({ anchor, key: node.key, index: 0, sentence });
           }
+          spokenRef.current.set(node.key, spoken);
         }
         if (jobs.length === 0) return;
         jobs.sort((a, b) => a.anchor - b.anchor || a.index - b.index);
@@ -3676,6 +3755,7 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
       __internals: {
         splitSentences,
         cleanReplyText,
+        pickSpoken,
         chatNodes,
         viewportBounds,
         clampPosition,
