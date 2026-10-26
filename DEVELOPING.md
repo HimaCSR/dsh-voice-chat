@@ -127,7 +127,7 @@ $P    = "<本仓库同级>\probe"
 | `manifest-check.mjs` | **Electron-as-node**（要 DSH 里的 js-yaml） | 清单/patch/相对 import 一致性 | `consistent` |
 | `worker-e2e.mjs` | **Electron-as-node**（sherpa 在 app.asar 里） | 真模型转写 + 噪声/静音拒识 + **降级路径** | 7/7 |
 | `live-verify.mjs` | **Electron-as-node** | 打运行中的 GUI，24 项含真 MiMo 合成、**profile 没把插件目录设成热重载监听根** | 24/24 |
-| `broadcast-verify.mjs` | **Electron-as-node** | **播报行为**：只读首尾句、settle 时首句不重复读、同句重复读两次、小数/版本/缩写不切错、四种模式、未知模式回落。import 的是**真的 `client.js`** | 9/9 |
+| `broadcast-verify.mjs` | **Electron-as-node** | **播报行为**：只读首尾句、settle 时首句不重复读、同句重复读两次、小数/版本/缩写不切错、四种模式、未知模式回落、**插话打断朗读链**。import 的是**真的 `client.js`** | 11/11 |
 | `firered-spike.mjs` | 普通 node + `$env:DSH_VOICE_MODULE_DIR=<profile>` | FireRedVAD 数值闸门（语音 vs 噪声 vs 静音） | PASS |
 | `vad-backends.mjs` | **Electron-as-node** | 子进程逐个验 ten/silero 是否可用——sherpa 模型不对时会 `exit(-1)`，只能靠子进程观察 | 见输出 |
 
