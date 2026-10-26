@@ -101,6 +101,9 @@ const DEFAULTS = {
 /** The ways a reply can be read out. */
 const SPEAK_MODES = ['head-tail', 'all', 'head', 'tail'];
 
+/** The provider kinds a user may create. */
+const PROVIDER_KINDS = ['mimo', 'openai-speech', 'siliconflow', 'dev-tone'];
+
 const MUTABLE = {
   voice: 'tts.voice',
   apiKey: 'tts.apiKey',
@@ -129,6 +132,10 @@ const MUTABLE = {
  * expected.
  */
 const MUTABLE_OBJECTS = {
+  // The provider table. It is written from inside the plugin only: through
+  // /config a whole-table write could drop every custom provider, key
+  // included, in one call. Adding and removing a provider goes through
+  // /providers, which checks the record and writes only the known fields.
   providers: 'tts.providers',
 };
 
@@ -385,12 +392,15 @@ export function apply(ctx, rawConfig = {}) {
       const next = { ...(config.tts.providers ?? {}) };
       delete next[id];
       // The selection falls back to MiMo when the provider in use is removed.
-      await applyConfigPatch(currentId === id ? { providers: next, provider: 'mimo' } : { providers: next });
+      await applyConfigPatch(
+        currentId === id ? { providers: next, provider: 'mimo' } : { providers: next },
+        { trusted: true },
+      );
       log(`provider removed: ${id}`);
       return describeProviders();
     }
     const kind = record.kind ?? existing?.kind ?? 'openai-speech';
-    if (!['mimo', 'openai-speech', 'dev-tone'].includes(kind)) {
+    if (!PROVIDER_KINDS.includes(kind)) {
       throw fail('bad-request', `不支持的供应商类型：${kind}`);
     }
     const builtin = BUILTIN_PROVIDERS.find((entry) => entry.id === id) ?? null;
@@ -400,7 +410,7 @@ export function apply(ctx, rawConfig = {}) {
     // else it happens to carry — into the configuration file.
     const merged = mergeProviderRecord(existing ?? builtin ?? {}, record, id, kind);
     next[id] = merged;
-    await applyConfigPatch({ providers: next });
+    await applyConfigPatch({ providers: next }, { trusted: true });
     log(`provider saved: ${id}`);
     return describeProviders();
     });
@@ -461,7 +471,7 @@ export function apply(ctx, rawConfig = {}) {
    * This is the inner half; it expects the caller to already hold the
    * configuration queue. `updateConfig` is the entry point for everyone else.
    */
-  async function applyConfigPatch(patch) {
+  async function applyConfigPatch(patch, options = {}) {
     const next = {};
     for (const [key, dotted] of Object.entries(MUTABLE)) {
       if (patch[key] === undefined) continue;
@@ -479,6 +489,9 @@ export function apply(ctx, rawConfig = {}) {
     }
     for (const [key, dotted] of Object.entries(MUTABLE_OBJECTS)) {
       if (patch[key] === undefined) continue;
+      // The provider table is the plugin's own business: it is only written
+      // when the plugin itself asks for it, never from a request body.
+      if (key === 'providers' && options.trusted !== true) continue;
       const value = patch[key];
       if (value === null || typeof value !== 'object' || Array.isArray(value)) continue;
       next[key] = value;
