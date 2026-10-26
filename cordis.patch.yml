@@ -10,15 +10,13 @@
     - id: voice-chat
       name: '@local/dsh-voice-chat'
       config:
-        stt:
-          enabled: true
           # `firered` runs the official FireRedVAD ONNX graph through
           # onnxruntime-node; it degrades to `ten` (TEN-VAD via sherpa-onnx)
           # when that runtime is unavailable, and says so in the settings UI.
-          vadBackend: firered
-          vadFallback: ten
-          language: auto
-          precision: int8
+        vadBackend: firered
+        vadFallback: ten
+        language: auto
+        precision: int8
         tts:
           provider: mimo
           # `mimo-v2.5-tts` for a preset voice, `mimo-v2.5-tts-voiceclone` when

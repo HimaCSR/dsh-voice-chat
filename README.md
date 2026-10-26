@@ -59,7 +59,8 @@ dsh plugin --profile desktop add github:HimaCSR/dsh-voice-chat
 然后把包名 `@local/dsh-voice-chat` 追加到 `%DSH_HOME%\profiles\desktop\package.json` 的 `dsh.profile.bundles` 数组，重启 DSH。
 
 > **实测记录（本机）**：`dsh plugin --profile desktop add "<路径>"` 会同时完成两件事——以 `link:` 方式把插件装进 profile 的 `node_modules`，并把包名追加进 `dsh.profile.bundles`。跑完插件**当场就生效了**（Web 配置层热重载），不需要重启。
-> **之后改插件代码不必重启**：profile patch 末尾给 `@deepseek-ai/dsh-hmr` 配了 `root` 指向插件目录，Host 半区（`index.js` / `lib/*.js`）保存即热重载。实测（2026-10-13）：写入 `index.js` 后，下一次 400 ms 采样就已在 `/dsh-voice/state` 里看到新代码，路由全程无 404 空窗。生效矩阵与两个代价见 DEVELOPING §2。
+> **之后改插件代码怎么生效**：Host 半区（`index.js` / `lib/*.js`）改完**手动重载插件**（插件管理器里关一次再开一次）；浏览器半区（`client.js`）改完**刷新页面**（F12 → Ctrl+R）。生效矩阵见 DEVELOPING §2。
+> ⚠️ **不要**给插件目录开热重载监听根（profile patch 里 `@deepseek-ai/dsh-hmr` 的 `root`）：插件目录常在同步盘上，热重载会让 DSH 在写入与同步程序抢文件时重新导入浏览器半区，导入失败就**崩溃并强制备份重启**。真实事故见 DEVELOPING §1。
 >
 > **关于依赖**：`dsh plugin add <路径>` 用的是 `link:` 协议，pnpm **不会**顺带安装被链接包的依赖，所以 `onnxruntime-node` 要单独装一次：
 > ```powershell
@@ -428,7 +429,7 @@ update:
 
 | 现象 | 原因 / 处理 |
 |---|---|
-| **改了插件代码但没生效** | 分三种情况：`index.js` / `lib/*.js`（Host 半区）**保存即热重载**，数百毫秒生效（见 DEVELOPING §2）；`client.js`（浏览器半区）**必须刷新页面**（F12 → Ctrl+R）；`package.json` 的清单字段（如 `dsh.client.inject`）**必须重启 DSH**。注意「停用再启用插件行」是另一条路径——它只重挂配置、不重新导入模块，既不能替代热重载，也不能替代重启 |
+| **改了插件代码但没生效** | 分三种情况：`index.js` / `lib/*.js`（Host 半区）**手动重载插件**（插件管理器里关一次再开一次，见 DEVELOPING §2）；`client.js`（浏览器半区）**必须刷新页面**（F12 → Ctrl+R）；`package.json` 的清单字段（如 `dsh.client.inject`）**必须重启 DSH**。注意「停用再启用插件行」是另一条路径——它只重挂配置、不重新导入模块，既不能替代重载，也不能替代重启 |
 | 胶球旁显示 **⚠ 语音模型未就绪** | 点开设置面板 → **下载并准备本地模型**（首次约 233 MB）。胶球图标本身也会变琥珀色 |
 | `下载失败：所有源都不可用` | huggingface.co 与 hf-mirror.com 都不通。可在 `config.stt.modelDirectory` 指向已有的 SenseVoice 目录 |
 | 设置面板里 `断句 VAD` 不是 `firered` | 先用 `GET /dsh-voice/diag` 看 `modules.onnxruntime` 的解析结果和 `attempts`（每个解析根失败的原因都在里面），再看同一行的 `vadNote`。装不上只会降级，不影响使用 |
@@ -494,7 +495,7 @@ dsh-voice-chat/
 
 | 套件 | 结果 |
 |---|---|
-| 单元测试 | 73 / 73（含"浏览器半区 `apply()` 能跑通并注册两个 seat"、胶球几何、供应商归一化、版本比较、依赖区间判断、人设段落命名与重名拒绝、跨供应商 Key 隔离、pnpm 布局覆盖、限流退避与超时重试、硅基流动两步克隆与音色 id 缓存） |
+| 单元测试 | 75 / 75（含"浏览器半区 `apply()` 能跑通并注册两个 seat"、胶球几何、供应商归一化、版本比较、依赖区间判断、人设段落命名与重名拒绝、跨供应商 Key 隔离、pnpm 布局覆盖、限流退避与超时重试、硅基流动两步克隆与音色 id 缓存、**自定义更新源必须是真地址**） |
 | HTTP 契约 | 22 / 22 |
 | Bundle 清单 / patch 静态校验 | 一致 |
 | FireRedVAD 数值闸门 | PASS（语音均值 0.709 / 覆盖率 86.3%，噪声与静音均 0 段） |

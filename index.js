@@ -10,8 +10,9 @@
  * All of it is registered through `ctx.effect`, so disabling the plugin
  * unregisters the route and kills the worker without leaving a listener behind.
  */
+import fs from 'node:fs/promises';
 import path from 'node:path';
-import { defaultDataRoot, expandPath, fail, log, readJson, warn, writeJsonAtomic } from './lib/util.js';
+import { defaultDataRoot, expandPath, fail, log as hostLog, readJson, warn as hostWarn, writeJsonAtomic } from './lib/util.js';
 import { inspectAssets, prepareAssets, resolveAssets } from './lib/assets.js';
 import { SttService } from './lib/stt.js';
 import { createVoiceRoutes } from './lib/routes.js';
@@ -39,11 +40,20 @@ const RELEASE_SPEC_PATTERN = /^github:HimaCSR\/dsh-voice-chat@v\d+\.\d+\.\d+$/;
 /** Provider ids are file- and log-safe: letters, digits, dots and dashes. */
 const PROVIDER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
+/**
+ * The provider the flat `tts.*` fields belong to.
+ *
+ * `lib/tts.js` folds the flat `tts.baseUrl` / `tts.model` / `tts.apiKey` into
+ * this one provider, so the flat API-key slot is MiMo's key and nobody else's.
+ * It is spelled out here instead of imported, so that the Host half does not
+ * depend on the internals of a module that is free to change.
+ */
+const LEGACY_PROVIDER_ID = 'mimo';
+
 /** Baseline configuration; every field is overridable from the bundle patch. */
 const DEFAULTS = {
   dataRoot: defaultDataRoot(),
   stt: {
-    enabled: true,
     // `firered` is the requested detector; `ten` and `silero` are the
     // sherpa-onnx alternatives it degrades to when ONNX Runtime is absent.
     vadBackend: 'firered',
@@ -79,7 +89,7 @@ const DEFAULTS = {
     authStyle: 'auto',
     instruction: '',
     maxChars: 1200,
-    timeoutMs: 120000,
+    timeoutMs: 60000,
     apiKey: null,
     apiKeyEnv: 'MIMO_API_KEY',
     // The conversation persona, injected into the harness system prompt. It
@@ -118,7 +128,12 @@ function sanitizeProviderTable(table) {
   for (const [id, record] of Object.entries(table)) {
     if (record === null || typeof record !== 'object' || Array.isArray(record)) continue;
     const kind = typeof record.kind === 'string' ? record.kind : 'openai-speech';
-    out[id] = mergeProviderRecord({}, record, id, kind);
+    try {
+      out[id] = mergeProviderRecord({}, record, id, kind);
+    } catch {
+      // One record that does not meet the rules must not take the whole
+      // table — and with it every other provider and its key — down.
+    }
   }
   return out;
 }
@@ -198,6 +213,84 @@ export function apply(ctx, rawConfig = {}) {
   config.dataRoot = expandPath(config.dataRoot);
   config.logPath = path.join(config.dataRoot, 'plugin.log');
   const overridesPath = path.join(config.dataRoot, 'config.json');
+
+  // `stt.enabled` used to be a switch that nothing read: the recognizer is
+  // started by the plugin, not by a setting. The bundle patch still carries
+  // the key, so it is dropped here as well — a setting that does nothing
+  // must not look like one that does.
+  if (config.stt && typeof config.stt === 'object') delete config.stt.enabled;
+
+  /**
+   * Hide anything that looks like a credential.
+   *
+   * The log file is served to the browser half, so a line that quotes a
+   * request or a configuration value must not carry a key. Only a value long
+   * enough to be one is hidden: a short word after the word "key" is a
+   * sentence, not a secret.
+   */
+  function redact(text) {
+    return String(text)
+      .replace(/(api[-_ ]?key|authorization|bearer|token|secret)(["'\s:=]{1,4})([^\s"',;]{12,})/gi, '$1$2***');
+  }
+
+  /**
+   * Append a line to the plugin's own log file.
+   *
+   * The file is what `GET /log` serves, so it is the only place the Host
+   * half's diagnostics are kept. Writing to it is best-effort: a disk that
+   * cannot be written to must not stop the plugin from working, and the
+   * console still carries the line.
+   */
+  function appendLog(text) {
+    const line = `[voice-chat] ${new Date().toISOString()} ${redact(text)}\n`;
+    try {
+      void fs.mkdir(path.dirname(config.logPath), { recursive: true })
+        .then(() => fs.appendFile(config.logPath, line, 'utf8'))
+        .catch(() => {});
+    } catch {
+      // The console still has the line.
+    }
+  }
+
+  /** The plugin's diagnostics: the console, and the log file behind `/log`. */
+  function log(...parts) {
+    appendLog(parts.join(' '));
+    hostLog(...parts);
+  }
+
+  /** A warning, kept separate so the log file can be read for real faults. */
+  function warn(...parts) {
+    appendLog(`WARN ${parts.join(' ')}`);
+    hostWarn(...parts);
+  }
+
+  /**
+   * Record one line in the plugin's log file.
+   *
+   * The route layer uses it, so a request that failed is in the same log as
+   * the rest of the Host half.
+   */
+  function noteLog(text) {
+    appendLog(String(text));
+  }
+
+  /**
+   * The API keys that are stored right now.
+   *
+   * They are never sent anywhere, but the log file is served to the browser
+   * half, so every one of them is masked in what it returns: a line that
+   * quotes a key cannot hand it out.
+   */
+  function storedSecrets() {
+    const secrets = new Set();
+    const flat = config.tts?.apiKey;
+    if (typeof flat === 'string' && flat !== '') secrets.add(flat);
+    for (const record of Object.values(config.tts?.providers ?? {})) {
+      const key = record?.apiKey;
+      if (typeof key === 'string' && key !== '') secrets.add(key);
+    }
+    return [...secrets];
+  }
 
   // Ask DSH where this profile lives instead of guessing. A bundle installed by
   // `dsh plugin add <path>` is linked into `<profile>/node_modules` while its
@@ -281,27 +374,52 @@ export function apply(ctx, rawConfig = {}) {
     return result;
   }
 
-  const ready = readJson(overridesPath, {}).then(async (stored) => {
-    if (stored && typeof stored === 'object') {
-      overrides = stored;
-      for (const [key, dotted] of Object.entries(MUTABLE)) {
-        if (stored[key] !== undefined) setPath(config, dotted, stored[key]);
-      }
-      for (const [key, dotted] of Object.entries(MUTABLE_OBJECTS)) {
-        if (stored[key] === undefined) continue;
-        if (key === 'providers') {
-          // The stored table did not come through the /providers route, so
-          // it never met the field and environment-variable rules. Run it
-          // through them again: the closed list of environment variables is
-          // only worth anything if it is applied on the way in, and this is
-          // the way in.
-          setPath(config, dotted, sanitizeProviderTable(stored[key]));
-          continue;
-        }
-        setPath(config, dotted, stored[key]);
-      }
-      log('restored runtime overrides');
+  /**
+   * The configuration file as it was when the plugin started.
+   *
+   * The file is read right away, but its contents are only merged into the
+   * running configuration inside the configuration queue: a settings write
+   * that arrives before the read has finished must wait for the restore
+   * instead of being rolled back by it.
+   */
+  const storedConfig = readJson(overridesPath, null).catch(() => null);
+
+  /**
+   * Merge the stored runtime overrides into the running configuration.
+   *
+   * This is the first task in the configuration queue, so every settings
+   * write that follows it sees the restored state, and the restore itself
+   * never overwrites a write that came in first.
+   */
+  async function restoreOverrides() {
+    const stored = await storedConfig;
+    if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return;
+    // Whatever is already in memory was written after the file was read, so
+    // it wins: the restore must not undo a write that came in first. The
+    // fields this file does not know about are carried along untouched.
+    overrides = { ...stored, ...overrides };
+    for (const [key, dotted] of Object.entries(MUTABLE)) {
+      if (overrides[key] !== undefined) setPath(config, dotted, overrides[key]);
     }
+    for (const [key, dotted] of Object.entries(MUTABLE_OBJECTS)) {
+      if (overrides[key] === undefined) continue;
+      if (key === 'providers') {
+        // The stored table did not come through the /providers route, so
+        // it never met the field and environment-variable rules. Run it
+        // through them again: the closed list of environment variables is
+        // only worth anything if it is applied on the way in, and this is
+        // the way in.
+        setPath(config, dotted, sanitizeProviderTable(overrides[key]));
+        continue;
+      }
+      setPath(config, dotted, overrides[key]);
+    }
+    log('restored runtime overrides');
+  }
+
+  const ready = enqueueConfig(() => restoreOverrides()).then(async () => {
+    // The asset report is not part of the configuration, so it is not read
+    // under the queue: a slow disk must not hold up a settings write.
     assets = await inspectAssets(config, { verify: false }).catch(() => null);
     pluginVersion = await readPluginVersion();
     return assets;
@@ -496,6 +614,51 @@ export function apply(ctx, rawConfig = {}) {
   }
 
   /**
+   * Store an API key for the provider that is in use.
+   *
+   * A key belongs to a service, not to the plugin: two services need two
+   * different keys, so a single flat slot would make switching providers
+   * overwrite the previous one's credentials — and, worse, hand the second
+   * service's key to the first service's address.
+   *
+   * The provider's own record is where the key belongs: that is the place
+   * `lib/tts.js` reads it from, and it is the only place a key can live for
+   * a service that is not MiMo. The flat `tts.apiKey` is the legacy MiMo
+   * slot, so it is only written when MiMo is the provider in use.
+   *
+   * An empty field clears the key, which is stored as `null` so that the
+   * environment variable can take over again — `null` means "cleared" and
+   * "never set" are two different things.
+   * @param value - the key from the request.
+   * @param next - the patch that is persisted.
+   */
+  function applyApiKey(value, next) {
+    if (value !== null && typeof value !== 'string') return;
+    const trimmed = typeof value === 'string' ? value.trim() : '';
+    const key = trimmed === '' ? null : trimmed;
+    const { providers, currentId } = normalizeProviders(config);
+    const selected = providers[currentId] ?? null;
+    if (!selected) {
+      throw fail('bad-request', `未知的 TTS 服务：${currentId}，无法保存 API Key`);
+    }
+    // The record is rebuilt from the one that is already stored, so nothing
+    // else in it is lost.
+    const table = { ...(config.tts.providers ?? {}) };
+    const record = { ...(table[currentId] ?? {}) };
+    record.id = currentId;
+    record.kind = selected.kind ?? record.kind ?? 'mimo';
+    record.apiKey = key;
+    table[currentId] = record;
+    setPath(config, 'tts.providers', table);
+    next.providers = table;
+    // The legacy flat slot is MiMo's, and only MiMo's.
+    if (currentId === LEGACY_PROVIDER_ID) {
+      next.apiKey = key;
+      setPath(config, 'tts.apiKey', key);
+    }
+  }
+
+  /**
    * Apply a settings patch, persist it, and return the new summary.
    *
    * This is the inner half; it expects the caller to already hold the
@@ -505,13 +668,13 @@ export function apply(ctx, rawConfig = {}) {
     const next = {};
     for (const [key, dotted] of Object.entries(MUTABLE)) {
       if (patch[key] === undefined) continue;
-      const value = patch[key];
-      if (key === 'apiKey' && typeof value === 'string' && value.trim() === '') {
-        // An empty field clears a stored key so the environment can take over.
-        next[key] = null;
-        setPath(config, dotted, null);
+      if (key === 'apiKey') {
+        // The key is not a flat setting: it belongs to the provider that is
+        // in use. It is written below, after the provider table of this very
+        // patch has been applied.
         continue;
       }
+      const value = patch[key];
       if (value !== null && typeof value !== 'string') continue;
       if (key === 'speakMode' && !SPEAK_MODES.includes(value)) continue;
       next[key] = value;
@@ -527,11 +690,15 @@ export function apply(ctx, rawConfig = {}) {
       next[key] = value;
       setPath(config, dotted, value);
     }
+    // The API key goes to the provider that is in use, so it is written
+    // last: it has to see the provider table as this patch left it.
+    if (patch.apiKey !== undefined) applyApiKey(patch.apiKey, next);
     overrides = { ...overrides, ...next };
     await writeJsonAtomic(overridesPath, overrides);
     if (next.voice !== undefined) log(`default voice set to ${String(next.voice)}`);
     if (next.provider !== undefined) log(`tts provider set to ${String(next.provider)}`);
     if (next.persona !== undefined) log('conversation persona updated');
+    if (patch.apiKey !== undefined) log('tts api key was saved');
     return describeConfig();
   }
 
@@ -699,6 +866,8 @@ export function apply(ctx, rawConfig = {}) {
     recentStt,
     noteClientError,
     clientErrors,
+    noteLog,
+    storedSecrets,
     describeConfig,
     updateConfig,
     prepareState,

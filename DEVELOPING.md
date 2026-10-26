@@ -61,13 +61,21 @@
 | 依赖形态 | `package.json` 里是 **`link:<插件目录>`**（符号链接，改源码即时生效）；用 `github:` 安装时是普通依赖 |
 | 已选为 bundle | 同文件 `dsh.profile.bundles` 含 `@local/dsh-voice-chat` |
 | 额外依赖 | profile 里另有 `onnxruntime-node@1.30.0`（`link:` 不会装被链接包的依赖，必须单独装） |
-| 运行数据 | `%DSH_HOME%\voice-chat\`：`models/`、`vad/`、`voices/`、`config.json`（**没有 `plugin.log`**，`log()` 只写 stdout/stderr，从不落盘） |
+| 运行数据 | `%DSH_HOME%\voice-chat\`：`models/`、`vad/`、`voices/`、`config.json`、`plugin.log`（宿主诊断日志；`GET /dsh-voice/log` 读它，其中的 API Key 会被打码） |
 
 **本机 profile 的三处手工改动**（要还原就改这三处）：
 
 1. `package.json` — `link:` 依赖 + `dsh.profile.bundles` 追加（`dsh plugin add` 自动写的）
 2. `pnpm-workspace.yaml` — pnpm 写下待决的 `allowBuilds: onnxruntime-node:`，已置为 **`false`**（win32/x64 二进制内置，脚本不需要跑）
-3. `cordis.patch.yml` — 末尾加了 `- id: hmr` 覆盖，`root: [<插件目录>]`，**让 Host 半区改代码热重载**
+3. `cordis.patch.yml` — **不要**给 `@deepseek-ai/dsh-hmr` 加 `root: [<插件目录>]`。
+   > ⚠️ **这条曾经是"第 3 处手工改动"，现在是一条禁止项。** 开启热重载后，每写一次文件，
+   > DSH 就会重新 import 整个插件的**浏览器半区**。插件目录若在**同步盘**上（移动云盘、
+   > 坚果云、OneDrive…），写入与同步程序会互相抢文件，浏览器半区就会 import 失败：
+   > 页面报 `web boot: 1 entry did not activate`，**DSH 桌面端直接崩溃并强制备份重启**。
+   > 真实案例：2026-10-26 20:39，崩溃日志 `crash-2026-10-26T12-39-38-879Z-web-boot.log`。
+   > 代价是不用热重载：改完 Host 代码要**手动重载插件**（插件管理器里关一次再开一次），
+   > 或 `probe/verify/` 的脚本自己驱动。**这个代价远小于让 DSH 崩。**
+   > `probe/verify/live-verify.mjs` 里有一条检查专门盯着这个配置，别把它删了。
 
 ---
 
@@ -75,14 +83,20 @@
 
 | 改了什么 | 生效方式 |
 |---|---|
-| `index.js`、`lib/*.js`（Host 半区） | **热重载**，保存即生效（实测 < 400 ms，靠上面第 3 条 HMR root） |
+| `index.js`、`lib/*.js`（Host 半区） | **手动重载插件**：插件管理器里把它关一次再开一次。*不要*用 hmr 监听根来图省事——原因见上面第 3 条 |
 | `client.js`（浏览器半区） | **必须刷新页面**。客户端 bundle 是按文件元信息算版本的，且 Host 侧不会替你重导 |
 | `cordis.patch.yml` 的 `config` | 热重载，配置层重组 |
 | `package.json` 的 `dsh.client.inject` 等清单字段 | 需要重启 DSH |
 
-> **热重载 = 完整 dispose + 重新 import**，不是"只重挂配置"。实测（2026-10-13）：写入 `index.js` 后，新代码生效与内存账本 `recent`/`recentStt` 由 8 清零**同时**发生，路由全程无 404 空窗（`webServer` 注册被原子替换）。两个代价必须记住：
+> **重载 = 完整 dispose + 重新 import**，不是"只重挂配置"。实测（2026-10-13）：写入 `index.js` 后，新代码生效与内存账本 `recent`/`recentStt` 由 8 清零**同时**发生，路由全程无 404 空窗（`webServer` 注册被原子替换）。两个代价必须记住：
 > - **改 Host 代码会杀掉正在跑的识别 worker**（`index.js` 里 `stt.dispose()` 那个 effect）。**聆听中改代码，那一轮录音就废了**。
 > - 内存账本 `recent` / `recentStt` 每次重载清零、无法跨重载累积；反过来说，改完代码再看账本就是干净基线。
+>
+> **浏览器半区为什么必须刷新页面**：客户端 bundle 由 DSH 在运行时按文件元信息拼出来并 import。
+> 宿主重载**不会**替你重新 import 它——所以改了 `client.js` 之后，F12 → Ctrl+R 是唯一生效途径。
+> 顺带一提：客户端半区在**插件被重载**时也会被重新 import 一次。半区代码有语法错误时，
+> 页面不会只报那个错，而是整个 web boot 失败、DSH 崩掉——所以 `client.js` 改完先跑一遍
+> `probe/verify/unit-tests.mjs`，它会真的 import 一遍这个文件。
 
 **刷新页面的正确姿势**：DSH 桌面窗口**没有地址栏**，按 **F12** 开 DevTools（`main.js` 里无条件绑定），在 DevTools 里点刷新按钮或按 Ctrl+R。
 
