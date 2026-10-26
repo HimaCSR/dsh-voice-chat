@@ -297,13 +297,13 @@ return { inject: ['slots', 'locale', 'sessions'], apply(ctx) {
 - **`inject` 回调收到的是 session-scope key（会话 id）**，来自 `runInject` 的 `binding.key`。
 - 两个 seat：`conversation.input.dock`（胶球）、`conversation.input.left`（隐藏的回复监听，靠 `props.useChat` 读 assistant 文本）。
 - localStorage：`dsh.voice.enabled` / `dsh.voice.interrupt` / `dsh.voice.voice` / `dsh.voice.language`。
-- 单测钩子：`client.js` 返回的 `__internals = { splitSentences, cleanReplyText, chatNodes }`（给 `unit-tests.mjs` 用，别删）。
+- 单测钩子：`client.js` 返回的 `__internals`（给 `unit-tests.mjs` 用，别删）。现在导出的是：文本工具 `splitSentences` / `cleanReplyText` / `pickSpoken` / `isTrivial`、基线 `historyAnchor`、几何 `viewportBounds` / `clampPosition` / `snapToEdge` / `attachTo` / `refit` / `nearestEdge` / `dockLayout` / `dockCentre` / `waveRadius` / `panelLimits` / `alertPlacement`、滑杆换算 `sliderToThreshold` / `thresholdToSlider`、以及 `PROVIDER_ID_PATTERN`。**新增纯函数就顺手导出**，不必另写测试脚手架。
 - **样式表是插件自己注入的**（`ensureStyleTag()`，`<style id="dsh-voice-styles">`，在 `ctx.effect` 里挂载/清理）。原因：keyframes、伪元素、`prefers-reduced-motion` 没法用内联样式对象表达。全部选择器都挂在 `.dshv` 前缀下，不污染应用；亮暗靠 `body[data-ds-dark-theme] .dshv` 切一组 `--dshv-*` 变量。
   > **CSS 注释里绝对不能出现反引号** —— 那段 CSS 是 JS 模板字符串，一个反引号就把字符串截断了（踩过一次，`node --check` 立刻抓到）。写注释要说"the transform property"，不要写代码样式。
 - **图标是内联 SVG**（`PATHS` + `Icon`），不再用 emoji；颜色一律 `currentColor`。
 - **胶球是固定定位浮层**（不是原来那个内联工具行）。位置存 `dsh.voice.pos`（视口比例），拖动时**直接写 `left/top`、不走 state**（`useLayoutEffect` 只在 `position` 变更时应用），否则重渲染会把正在拖的球拽回原位。拖动与点击用 5px 阈值区分。
-- **几何四个纯函数**（`viewportBounds` / `clampPosition` / `snapToEdge` / `layoutFan`，加内部的 `orientBeam` + `reflectBeam`）都接受可注入的 **rect**（`{x, y, width, height}`，不是 `{width, height}`），并且导出在 `__internals` 里 —— `unit-tests.mjs` 有一整套边界用例（四个角 + 边线 + 中央 + 一个 200×200 窄区强制走反射路径，逐个断言包围盒不出界、两两不重叠）。**改这几个函数必须跑单测**，边角行为眼睛看不可靠。
-- **可移动区域是运行时从 DOM 量的**（`resolveBounds`）：从胶球往上找最近一个 `overflow-y: auto|scroll|hidden` 且宽高都 ≥ 240 的祖先 —— 实测就是对话面板。量到的 rect 是**视口坐标**，跟 `position: fixed` 的 `left/top` 同一坐标系；存盘按这块 rect 的比例存。**吸边只在离边小于一个球直径（`ORB_SIZE`）时触发**，更远就停在原地；`snapToEdge` 因此返回 `{x, y, edge}` 或 `null`。吸住后 `edge` 会存进 `dsh.voice.pos`，`layoutFan` 拿到它会改成 `edgeLayout()` 的**沿边平行排布**（竖边排成一列、横边排成一行），而不是扇形。
+- **几何纯函数**（`viewportBounds` / `clampPosition` / `snapToEdge` / `dockLayout` / `dockCentre` / `refit` / `attachTo` / `nearestEdge`）都接受可注入的 **rect**（`{x, y, width, height}`，不是 `{width, height}`），并且导出在 `__internals` 里 —— `unit-tests.mjs` 有一整套边界用例（四个角 + 边线 + 中央 + 一个 200×200 窄区强制走反射路径，逐个断言包围盒不出界、两两不重叠）。**改这几个函数必须跑单测**，边角行为眼睛看不可靠。
+- **可移动区域是运行时从 DOM 量的**（`resolveBounds`）：从胶球往上找最近一个 `overflow-y: auto|scroll|hidden` 且宽高都 ≥ 240 的祖先 —— 实测就是对话面板。量到的 rect 是**视口坐标**，跟 `position: fixed` 的 `left/top` 同一坐标系；存盘按这块 rect 的比例存。**吸边只在离边小于一个球直径（`ORB_SIZE`）时触发**，更远就停在原地；`snapToEdge` 因此返回 `{x, y, edge}` 或 `null`。吸住后 `edge` 会存进 `dsh.voice.pos`，`dockLayout` 拿到它会改成 **沿边平行排布**（竖边排成一列、横边排成一行），而不是扇形。
 - **"瘫软耷拉"的形变在 `.dshv-gel` 上，不在 `.dshv-orb` 上**：`[data-attached]` 只改 `--dshv-sx/sy/sag/tilt` 四个变量，由 wrapper 的 `transform` 合成。**千万别把它写成 `.dshv-orb` 的 `border-radius`** —— 那个属性在聆听/朗读时由 JS 每帧写（`waveRadius`），任何动 `border-radius` 的 CSS 都会盖掉行内样式。转场的 `transition` 也只挂在 idle/notready 上，否则电平表会拖尾。
 - 想核对"发出去的 CSS 到底长什么样"，跑 `node probe/design/render-orb.mjs`：它从 `client.js` 里**抽出那段真 CSS**，检查它引用的每个 class 组件里确实渲染了，再用它生成可截图的 HTML。
 

@@ -942,7 +942,7 @@ registerProcessor('voice-chat-mic', MicCapture);
       editCurrentProvider: '编辑当前服务',
       editProvider: '修改服务',
       providerId: '服务标识',
-      providerIdHint: '只能用小写字母、数字和短横线；创建后不可更改。',
+      providerIdHint: '只能用字母、数字、点和短横线，且以字母或数字开头；创建后不可更改。',
       providerIdInvalid: '标识不合法：需以字母或数字开头，只能包含字母、数字、点和短横线。',
       providerLabel: '显示名称',
       providerBaseUrl: '接口地址',
@@ -1091,7 +1091,7 @@ registerProcessor('voice-chat-mic', MicCapture);
       editCurrentProvider: 'Edit the service in use',
       editProvider: 'Edit service',
       providerId: 'Service id',
-      providerIdHint: 'Lowercase letters, digits and dashes only; it cannot be changed later.',
+      providerIdHint: 'Letters, digits, dots and dashes, starting with a letter or a digit; it cannot be changed later.',
       providerIdInvalid: 'Not a valid id: it must start with a letter or a digit and may only contain letters, digits, dots and dashes.',
       providerLabel: 'Display name',
       providerBaseUrl: 'Endpoint',
@@ -1677,7 +1677,10 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
         error: null,
         speaking: false,
         ttsController: null,
-        interruptHandler: null,
+        // Counts how many times the user barged in. A counter rather than
+        // a flag: the flag would be cleared by the first reader, and the
+        // read-out chain has to notice the barge-in too.
+        interruptSeq: 0,
         recorder: null,
         // True while the microphone is being opened, so a second click does
         // not start a second recorder; and set when the microphone is closed
@@ -1685,6 +1688,10 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
         // opening a microphone the user just turned off.
         starting: false,
         stopRequested: false,
+        // Utterances that arrived while a recognition was still running.
+        // They wait their turn so the sentences reach the conversation in
+        // the order they were spoken.
+        pendingUtterances: [],
         sessionId: undefined,
         listeners: new Set(),
         options: {
@@ -1785,7 +1792,7 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
         engine.ttsController?.abort();
         engine.ttsController = null;
         setEngine({ speaking: false });
-        engine.interruptHandler?.();
+        engine.interruptSeq += 1;
       }
 
       /** Deliver a recognized sentence through the session-scoped prompt API. */
@@ -1827,6 +1834,15 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
       }
 
       async function recognize(pcm) {
+        // One utterance at a time. The microphone keeps collecting while a
+        // recognition is in flight, so a second utterance can arrive before
+        // the first one has been sent. Running them together would let the
+        // slower one overtake the other, and the sentences would reach the
+        // conversation in the wrong order.
+        if (engine.recognizing) {
+          engine.pendingUtterances.push(pcm);
+          return;
+        }
         engine.recorder?.setPaused(true);
         // A fresh attempt supersedes the previous failure; otherwise the old
         // message would sit beside the bead until the page was reloaded.
@@ -1843,8 +1859,15 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
           // the browser would otherwise be gone with the tab.
           void client.reportError?.('stt', message, String(error?.stack ?? '').slice(0, 500));
         } finally {
-          setEngine({ recognizing: false });
-          engine.recorder?.setPaused(false);
+          const next = engine.pendingUtterances.shift();
+          if (next === undefined) {
+            setEngine({ recognizing: false });
+            engine.recorder?.setPaused(false);
+          } else {
+            // The next utterance is already waiting: keep the microphone
+            // paused and carry straight on with it.
+            void recognize(next);
+          }
         }
       }
 
@@ -3734,21 +3757,21 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
       const spokenRef = useRef(new Map());
       const chainRef = useRef(Promise.resolve());
       const baselineRef = useRef(null);
+      // The last barge-in the listener has already accounted for.
+      const seenInterruptRef = useRef(0);
       const skipRef = useRef(0);
-      const interruptedRef = useRef(false);
       const [, force] = useState(0);
 
       useEffect(() => subscribe(() => force((value) => value + 1)), [subscribe]);
 
       // The microphone's barge-in path asks this listener to abandon the reply
-      // currently being spoken.
+      // currently being spoken. The signal lives on the engine rather than in
+      // a callback: a callback is only there while this seat is mounted, and
+      // a barge-in that arrives in the gap — while the session is switching,
+      // or between two mounts — would otherwise be dropped, leaving the
+      // reply being read out after the user had interrupted it.
       useEffect(() => {
-        engine.interruptHandler = () => {
-          interruptedRef.current = true;
-        };
-        return () => {
-          engine.interruptHandler = null;
-        };
+        seenInterruptRef.current = engine.interruptSeq;
       }, [engine]);
 
       useEffect(() => () => speaker.stop(), [speaker]);
@@ -3776,8 +3799,9 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
           skipRef.current = settledAnchor;
           return;
         }
-        if (interruptedRef.current) {
-          interruptedRef.current = false;
+        if (engine.interruptSeq !== seenInterruptRef.current) {
+          // The user barged in: the rest of that reply is not read out.
+          seenInterruptRef.current = engine.interruptSeq;
           skipRef.current = maxAnchor;
           return;
         }
@@ -3814,15 +3838,18 @@ body[data-ds-dark-theme] .dshv-backdrop{background:rgba(0,0,0,.48)}
         if (jobs.length === 0) return;
         jobs.sort((a, b) => a.anchor - b.anchor || a.index - b.index);
         const voice = readString(STORAGE.voice, '') || engine.config?.voice || '';
+        // The chain watches the barge-in counter: a reply that was cut short
+        // must not be read out to the end afterwards.
+        const chainSeq = engine.interruptSeq;
         chainRef.current = jobs.reduce(
           (chain, job) =>
             chain.then(async () => {
-              if (interruptedRef.current || !readFlag(STORAGE.enabled, true)) return;
+              if (engine.interruptSeq !== chainSeq || !readFlag(STORAGE.enabled, true)) return;
               const controller = new AbortController();
               engine.ttsController = controller;
               try {
                 const audio = await client.tts(job.sentence, voice, controller.signal);
-                if (interruptedRef.current) return;
+                if (engine.interruptSeq !== chainSeq) return;
                 speaker.enqueue(audio);
                 // Speaking again means the failure is behind us. A persistent
                 // problem — an unset key, say — simply reports itself once more.

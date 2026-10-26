@@ -15,8 +15,8 @@ import { defaultDataRoot, expandPath, fail, log, readJson, warn, writeJsonAtomic
 import { inspectAssets, prepareAssets, resolveAssets } from './lib/assets.js';
 import { SttService } from './lib/stt.js';
 import { createVoiceRoutes } from './lib/routes.js';
-import { anchorList, probeModule, setModuleAnchors } from './lib/sherpa.js';
-import { BUILTIN_PROVIDERS, PROVIDER_KINDS, checkBaseUrl, mergeProviderRecord, normalizeProviders, resolveProvider } from './lib/tts.js';
+import { setModuleAnchors } from './lib/sherpa.js';
+import { BUILTIN_PROVIDERS, PROVIDER_KINDS, mergeProviderRecord, normalizeProviders } from './lib/tts.js';
 import { UpdateChecker, readPluginVersion } from './lib/version.js';
 import { registerPersona, DEFAULT_PERSONA } from './lib/persona.js';
 import { auditDependencies, installDependency, readManifest } from './lib/deps.js';
@@ -176,9 +176,6 @@ function merge(base, source) {
 }
 
 /** Read `a.b` from a nested object. */
-function getPath(object, dotted) {
-  return dotted.split('.').reduce((value, key) => (value === null || value === undefined ? undefined : value[key]), object);
-}
 
 /** Write `a.b` into a nested object. */
 function setPath(object, dotted, value) {

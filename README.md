@@ -374,7 +374,7 @@ tts:
   provider: mimo           # 当前选中的供应商 id
   model: mimo-v2.5-tts
   cloneModel: mimo-v2.5-tts-voiceclone
-  baseUrl: https://api.xiaomimimo.com/v1
+  baseUrl: https://api.xiaomimimo.com/v1  # 只读：改地址请在设置里改这个供应商
   voice: mimo_default
   format: wav              # wav | mp3 | pcm
   apiKeyEnv: MIMO_API_KEY
@@ -399,7 +399,7 @@ update:
 | `apiKey` `apiKeyEnv` | 凭据；`apiKeyEnv` 指向环境变量名 |
 | `clone` | 是否支持声音克隆 |
 
-**旧配置不用改**：`tts.baseUrl` / `tts.model` / `tts.apiKey` 这些扁平字段在读取时会被归一化进当前选中的供应商，磁盘上的原字段保持不动。
+**旧配置不用改**：`tts.baseUrl` / `tts.model` / `tts.apiKey` 这些扁平字段在读取时会被归一化进**小米 MiMo**（它们本来就是 MiMo 的老配置），磁盘上的原字段保持不动。扁平的 `tts.baseUrl` 只读不写 —— 那是 API Key 发往的地址，改地址请走「服务」页。
 
 ### 人物设定与语气指令
 
@@ -494,7 +494,7 @@ dsh-voice-chat/
 
 | 套件 | 结果 |
 |---|---|
-| 单元测试 | 64 / 64（含"浏览器半区 `apply()` 能跑通并注册两个 seat"、胶球几何、供应商归一化、版本比较、依赖区间判断、人设段落命名与重名拒绝、跨供应商 Key 隔离、pnpm 布局覆盖、限流退避与超时重试、硅基流动两步克隆与音色 id 缓存） |
+| 单元测试 | 73 / 73（含"浏览器半区 `apply()` 能跑通并注册两个 seat"、胶球几何、供应商归一化、版本比较、依赖区间判断、人设段落命名与重名拒绝、跨供应商 Key 隔离、pnpm 布局覆盖、限流退避与超时重试、硅基流动两步克隆与音色 id 缓存） |
 | HTTP 契约 | 22 / 22 |
 | Bundle 清单 / patch 静态校验 | 一致 |
 | FireRedVAD 数值闸门 | PASS（语音均值 0.709 / 覆盖率 86.3%，噪声与静音均 0 段） |
